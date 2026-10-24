@@ -1,0 +1,78 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/blackbox-core",
+    "crates/blackbox-cold",
+    "crates/blackbox-supervisor",
+    "crates/blackbox-ingress",
+    "crates/blackbox-queue",
+    "crates/blackbox-telemetry",
+    "crates/blackbox-egress",
+    "bins/blackbox",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Project Blackbox Contributors"]
+
+[workspace.dependencies]
+# --- Storage core ---
+rkyv = "0.8"                # zero-copy serialization (0.8 API: rancor errors, rkyv::access)
+crc32c = "0.6"              # hardware-accelerated CRC32C (SSE4.2)
+redb = "2"                  # embedded ACID KV store (single-writer, group-commit on top)
+zstd = "0.13"               # cold-segment compression
+
+# --- Runtime / supervisor ---
+tokio = { version = "1", features = ["full"] }
+tikv-jemallocator = { version = "0.6", features = ["background_threads"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
+nix = { version = "0.29", features = ["fs", "signal"] }
+
+# --- CLI / plumbing ---
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- Phase 2: ingress proxy + telemetry ingestion ---
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
+tower = { version = "0.5", features = ["util"] }
+aho-corasick = "1"          # PII scrubber (SIMD multi-pattern matcher)
+roaring = "0.10"            # status-class / crash bitmap index
+flate2 = "1"                # gzip decode for Sentry/OTLP (rust backend, no C)
+
+serde_json = "1"            # OTLP JSON + Sentry envelope parsing
+fastrand = "2"              # W3C trace/span id generation
+sha2 = "0.10"               # egress request fingerprints + webhook HMAC (with hmac)
+hmac = "0.12"               # HMAC-SHA256 (webhook signature integrity checks)
+blake3 = "1"                # Phase 4 FinOps composite cache keys (SIMD-fast)
+lru = "0.12"                # Phase 4 byte-budgeted tenant cache
+socket2 = "0.5"             # SO_REUSEADDR listeners (respawn-in-place after kill)
+
+# --- Phase 4: zero-cert TLS egress (rustls, bundled webpki roots) ---
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring", "webpki-roots"] }
+
+# --- Phase 6: S3/R2 cold tier + Ed25519 canary self-update ---
+ed25519-dalek = "2"        # update-binary signature verification (tiny, no ring)
+
+# --- Internal ---
+blackbox-core = { path = "crates/blackbox-core" }
+blackbox-cold = { path = "crates/blackbox-cold" }
+blackbox-supervisor = { path = "crates/blackbox-supervisor" }
+blackbox-telemetry = { path = "crates/blackbox-telemetry" }
+blackbox-ingress = { path = "crates/blackbox-ingress" }
+blackbox-queue = { path = "crates/blackbox-queue" }
+blackbox-egress = { path = "crates/blackbox-egress" }
+
+[profile.release]
+opt-level = 3
+debug = false
+strip = "debuginfo"        # final binary audit: keep symtab for panic backtraces, drop debuginfo
+panic = "unwind"           # supervisor must be able to catch panics in worker tasks

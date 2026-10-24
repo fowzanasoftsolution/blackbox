@@ -1,0 +1,29 @@
+[package]
+name = "blackbox-cold"
+description = "Phase 6: zero-bloat S3/R2 cold tier — hand-rolled AWS SigV4 client (no aws-sdk), local S3-compatible mock server, segment sync / evicted-trace restore / bit-rot self-heal, crash-pinned tiered retention metadata."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+blackbox-core = { workspace = true }
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-rustls = { workspace = true }
+hyper-util = { workspace = true }
+redb = { workspace = true }
+rkyv = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+zstd = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+fastrand = { workspace = true }

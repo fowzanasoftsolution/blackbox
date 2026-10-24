@@ -1,0 +1,30 @@
+[package]
+name = "blackbox-egress"
+description = "Engine 4 (Phase 4): Egress FinOps & AI proxy — zero-cert TLS gateway routing, detached singleflight coalescing, tenant-scoped BLAKE3 cache with soft-error guard, real-time cost/token ledger, supervisor self-healing."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+blackbox-core = { workspace = true }
+blackbox-supervisor = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-rustls = { workspace = true }
+hyper-util = { workspace = true }
+lru = { workspace = true }
+redb = { workspace = true }
+rkyv = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+fastrand = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

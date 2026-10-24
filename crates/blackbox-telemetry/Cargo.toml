@@ -1,0 +1,16 @@
+[package]
+name = "blackbox-telemetry"
+description = "Engine 3 (Phase 2): Wire-compatible Sentry (/api/*/envelope/) + OTLP (/v1/traces, /v1/logs) ingestion correlated to TraceIDs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+blackbox-core = { workspace = true }
+flate2 = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zstd = { workspace = true }
+

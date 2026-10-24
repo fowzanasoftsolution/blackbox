@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blackbox — Omni-Sidecar Admin</title>
+<style>
+  :root{--bg:#0b0e14;--card:#121722;--line:#1e2635;--fg:#dbe4f0;--dim:#7d8ca3;--ok:#3fb27f;--warn:#e0a83a;--bad:#e05b5b;--accent:#5aa7ff;--mono:'SF Mono',Consolas,monospace}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;padding:24px}
+  h1{font-size:19px;letter-spacing:.4px;margin-bottom:2px}
+  .sub{color:var(--dim);font-size:12px;margin-bottom:20px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);margin-bottom:10px}
+  .kv{display:flex;justify-content:space-between;padding:3px 0;font-size:13px}
+  .kv span:first-child{color:var(--dim)}
+  .big{font-size:26px;font-weight:650;letter-spacing:-.5px}
+  .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.acc{color:var(--accent)}
+  .bar{height:7px;background:#0d1420;border-radius:4px;overflow:hidden;margin:8px 0 2px}
+  .bar i{display:block;height:100%;border-radius:4px;transition:width .4s}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px}
+  th{color:var(--dim);text-align:left;font-weight:500;padding:4px 6px;border-bottom:1px solid var(--line)}
+  td{padding:4px 6px;border-bottom:1px solid #161d2b;font-family:var(--mono);font-size:12px}
+  .row{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
+  input,button{background:#0d1420;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:8px 12px;font-size:13px}
+  input{flex:1;min-width:260px;font-family:var(--mono)}
+  button{cursor:pointer}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  #records{max-height:300px;overflow:auto}
+  .cmd{background:#0d1420;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-family:var(--mono);font-size:12px;color:var(--ok);margin-top:10px;display:none;cursor:pointer;white-space:pre-wrap}
+  .tag{display:inline-block;padding:1px 7px;border-radius:5px;font-size:11px;font-family:var(--mono)}
+  .t2xx{background:#123527;color:var(--ok)}.t4xx{background:#3a3115;color:var(--warn)}.t5xx{background:#3a1a1a;color:var(--bad)}.tinf{background:#152a3a;color:var(--accent)}
+</style>
+</head>
+<body>
+<h1>▣ BLACKBOX <span class="acc">omni-sidecar</span></h1>
+<div class="sub" id="uptime">self-healing · finops · deterministic replay — admin v1.0</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Ingress Shield</h2>
+    <div class="big" id="rps">0 <span style="font-size:13px;color:var(--dim)">req/s</span></div>
+    <div class="kv"><span>total requests</span><span id="reqTotal">–</span></div>
+    <div class="kv"><span>indexed frames</span><span id="frames">–</span></div>
+    <div class="kv"><span>distinct traces</span><span id="traces">–</span></div>
+    <div class="kv"><span>sampling dropped (85%)</span><span id="sampled">–</span></div>
+    <div class="kv"><span>writer drops</span><span id="drops">–</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Supervisor · RAM watermark</h2>
+    <div class="big" id="ramPct">–%</div>
+    <div class="bar"><i id="ramBar" style="width:0%;background:var(--ok)"></i></div>
+    <div class="kv"><span>level</span><span id="ramLevel">normal</span></div>
+    <div class="kv"><span>used / budget</span><span id="ramUsed">–</span></div>
+    <div class="kv"><span>process RSS</span><span id="rss">–</span></div>
+    <div class="kv"><span>disk free (data)</span><span id="disk">–</span></div>
+    <div class="kv"><span>circuit breaker</span><span id="breaker">–</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Egress FinOps</h2>
+    <div class="big ok" id="saved">$0.00 <span style="font-size:13px;color:var(--dim)">saved</span></div>
+    <div class="kv"><span>hit rate (cache+coalesce)</span><span id="hitRate">–</span></div>
+    <div class="kv"><span>cache HIT / COALESCE</span><span id="hits">–</span></div>
+    <div class="kv"><span>cache entries / bytes</span><span id="cacheSize">–</span></div>
+    <div class="kv"><span>watermark purges</span><span id="purges">–</span></div>
+    <div class="kv"><span>egress calls recorded</span><span id="recorded">–</span></div>
+    <div class="row" style="margin-top:8px"><button id="purgeBtn">Purge egress cache</button></div>
+  </div>
+
+  <div class="card">
+    <h2>Durable Queue / DLQ</h2>
+    <div class="kv"><span>pending</span><span id="qPending" class="warn">–</span></div>
+    <div class="kv"><span>in flight</span><span id="qFlight">–</span></div>
+    <div class="kv"><span>dead letter</span><span id="qDlq" class="bad">–</span></div>
+    <div class="kv"><span>delivered (lifetime)</span><span id="qOk" class="ok">–</span></div>
+    <div class="kv"><span>deduped / reaped</span><span id="qMisc">–</span></div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <h2>Trace Inspector — 1-click replay</h2>
+  <div class="row" style="margin-top:0">
+    <input id="tid" placeholder="32-hex trace id (x-blackbox-trace-id response header)">
+    <button id="traceBtn">Inspect</button>
+  </div>
+  <div class="cmd" id="cmd" title="click to copy"></div>
+  <div id="records"></div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <h2>FinOps Ledger — per (tenant, provider, model)</h2>
+  <table><thead><tr><th>tenant</th><th>provider</th><th>model</th><th>reqs</th><th>hits</th><th>coalesced</th><th>tokens used</th><th>tokens saved</th><th>cost spent</th><th>cost saved</th><th>savings</th></tr></thead>
+  <tbody id="finops"></tbody></table>
+</div>
+
+<script>
+let lastReq = null, lastT = null;
+const $ = id => document.getElementById(id);
+const fmt = b => b>1e9?(b/1e9).toFixed(1)+' GB':b>1e6?(b/1e6).toFixed(1)+' MB':b>1e3?(b/1e3).toFixed(1)+' KB':b+' B';
+const usd = m => '$'+(m/1e6).toFixed(4);
+
+async function poll(){
+  try{
+    const s = await (await fetch('/api/stats')).json();
+    const t = performance.now();
+    if(lastReq !== null){
+      const dt = (t - lastT)/1000;
+      $('rps').innerHTML = Math.round((s.ingress.total_requests - lastReq)/dt) + ' <span style="font-size:13px;color:var(--dim)">req/s</span>';
+    }
+    lastReq = s.ingress.total_requests; lastT = t;
+    $('reqTotal').textContent = s.ingress.total_requests.toLocaleString();
+    $('frames').textContent = s.ingress.frames.toLocaleString();
+    $('traces').textContent = s.ingress.distinct_traces.toLocaleString();
+    $('sampled').textContent = s.ingress.sampled_out.toLocaleString();
+    $('drops').textContent = s.ingress.dropped.toLocaleString();
+    $('uptime').textContent = `uptime ${Math.floor(s.uptime_secs/60)}m ${Math.floor(s.uptime_secs%60)}s · self-healing · finops · deterministic replay`;
+
+    $('ramPct').textContent = s.ram.pct.toFixed(0)+'%';
+    const bar = $('ramBar'); bar.style.width = Math.min(s.ram.pct,100)+'%';
+    bar.style.background = s.ram.pct>=85?'var(--bad)':s.ram.pct>=75?'var(--warn)':'var(--ok)';
+    $('ramLevel').textContent = s.ram.level;
+    $('ramUsed').textContent = fmt(s.ram.used)+' / '+fmt(s.ram.budget);
+    $('rss').textContent = fmt(s.ram.rss);
+    $('disk').textContent = fmt(s.disk.available);
+    $('breaker').textContent = s.breaker.state + (s.breaker.open_for_ms>0?` (${s.breaker.open_for_ms}ms)`:'');
+    $('breaker').className = s.breaker.state==='closed'?'ok':'bad';
+
+    const eg = s.egress;
+    $('saved').innerHTML = usd(eg.cost_micros_saved) + ' <span style="font-size:13px;color:var(--dim)">saved</span>';
+    const served = eg.ledger.total_requests||0, svd = (eg.ledger.cache_hits||0)+(eg.ledger.coalesced_hits||0);
+    $('hitRate').textContent = served? (100*svd/served).toFixed(1)+'%' : '–';
+    $('hits').textContent = `${eg.ledger.cache_hits||0} / ${eg.ledger.coalesced_hits||0}`;
+    $('cacheSize').textContent = `${eg.cache.entries} / ${fmt(eg.cache.bytes)}`;
+    $('purges').textContent = eg.cache.purges + (eg.cache.last_purge_reason?` (${eg.cache.last_purge_reason})`:'');
+    $('recorded').textContent = (eg.recorded||0).toLocaleString();
+
+    $('qPending').textContent = s.queue.pending;
+    $('qFlight').textContent = s.queue.in_flight;
+    $('qDlq').textContent = s.queue.dead_letter;
+    $('qOk').textContent = s.queue.delivered_total;
+    $('qMisc').textContent = `${s.queue.deduped_total} / ${s.queue.reaped_total}`;
+
+    const f = await (await fetch('/api/finops')).json();
+    $('finops').innerHTML = f.rows.map(r=>{
+      const pct = r.savings_pct.toFixed(1)+'%';
+      return `<tr><td>${r.tenant}</td><td>${r.provider}</td><td>${r.model}</td><td>${r.total_requests}</td><td>${r.cache_hits}</td><td>${r.coalesced_hits}</td><td>${r.tokens_used}</td><td class="ok">${r.tokens_saved}</td><td>${usd(r.cost_micros_spent)}</td><td class="ok">${usd(r.cost_micros_saved)}</td><td class="${r.savings_pct>50?'ok':''}">${pct}</td></tr>`;
+    }).join('') || '<tr><td colspan="11" style="color:var(--dim)">no egress traffic yet — set OPENAI_BASE_URL / ANTHROPIC_BASE_URL to this listener</td></tr>';
+  }catch(e){ console.error(e); }
+}
+
+async function inspect(){
+  const id = $('tid').value.trim();
+  if(!/^[0-9a-fA-F]{32}$/.test(id)){ alert('trace id must be 32 hex chars'); return; }
+  const r = await (await fetch('/api/trace/'+id)).json();
+  if(r.error){ $('records').innerHTML = `<div style="color:var(--bad);margin-top:8px">${r.error}</div>`; $('cmd').style.display='none'; return; }
+  $('cmd').textContent = r.replay_command; $('cmd').style.display='block';
+  $('records').innerHTML = '<table><thead><tr><th>seq</th><th>kind</th><th>status</th><th>detail</th><th>segment:offset</th></tr></thead><tbody>'+
+    r.records.map(x=>`<tr><td>${x.seq_no}</td><td><span class="tag ${x.cls}">${x.kind}</span></td><td>${x.status??''}</td><td>${x.detail}</td><td>${x.at}</td></tr>`).join('')+'</tbody></table>';
+}
+$('traceBtn').onclick = inspect;
+$('tid').addEventListener('keydown', e=>{ if(e.key==='Enter') inspect(); });
+$('cmd').onclick = () => navigator.clipboard.writeText($('cmd').textContent);
+$('purgeBtn').onclick = async () => { await fetch('/api/egress/purge',{method:'POST'}); poll(); };
+poll(); setInterval(poll, 1000);
+</script>
+</body>
+</html>

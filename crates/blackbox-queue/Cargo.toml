@@ -1,0 +1,21 @@
+[package]
+name = "blackbox-queue"
+description = "Engine 2 (Phase 3): Durable Webhooks & workflow dispatch — lease-based job state machine on redb group-commit, full-jitter backoff, upstream circuit breaker integration, deterministic time-travel replay with egress mock interceptor."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+blackbox-core = { workspace = true }
+bytes = { workspace = true }
+fastrand = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+redb = { workspace = true }
+rkyv = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "blackbox-core"
+description = "Project Blackbox storage core: rkyv 0.8 frame codec, append-only segment engine with torn-write auto-truncation, and the single-writer redb group-commit queue actor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+rkyv = { workspace = true }
+crc32c = { workspace = true }
+redb = { workspace = true }
+zstd = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

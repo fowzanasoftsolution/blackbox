@@ -1,0 +1,39 @@
+[package]
+name = "blackbox"
+description = "Project Blackbox CLI: run, crash & corruption harness, benchmarks, Phase 2 ingress proxy + gates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "blackbox"
+path = "src/main.rs"
+
+[dependencies]
+blackbox-core = { workspace = true }
+blackbox-cold = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+redb = { workspace = true }
+sha2 = { workspace = true }
+blackbox-egress = { workspace = true }
+blackbox-ingress = { workspace = true }
+blackbox-queue = { workspace = true }
+blackbox-supervisor = { workspace = true }
+tokio = { workspace = true }
+tikv-jemallocator = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true }
+nix = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+fastrand = { workspace = true }
+socket2 = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+serde_json = { workspace = true }
