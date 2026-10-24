@@ -546,6 +546,10 @@ pub async fn gate3() -> Result<()> {
         max_segment_mb: 1,
         disk_quota_mb: 4096,
         cold: None,
+        shield: true,
+        rate_rps: 0.0,
+        rate_burst: 100,
+        tls: crate::phase4::TlsOptions::Off,
     })
     .await?;
 

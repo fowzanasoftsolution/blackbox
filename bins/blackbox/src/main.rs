@@ -6,11 +6,13 @@
 
 mod bench;
 mod child;
+mod demo;
 mod harness;
 mod phase3;
 mod phase4;
 mod phase5;
 mod phase6;
+mod phase7;
 mod run;
 mod selfupdate;
 mod stats;
@@ -44,7 +46,7 @@ fn tune_jemalloc_decay() {
 #[command(
     name = "blackbox",
     version,
-    about = "Project Blackbox — Rust Omni-Sidecar & Self-Healing Architecture (Phase 6: S3/R2 cold tier + bit-rot self-heal + canary self-update)"
+    about = "Project Blackbox — Rust Omni-Sidecar & Self-Healing Architecture (v1.2: rate-limit shield + WAF + native TLS + one-command demo)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -77,6 +79,24 @@ enum Cmd {
         hold_ms: u64,
         #[arg(long, default_value_t = 48)]
         mem_budget_mb: u64,
+        /// Scanner/WAF shield on the ingress (default on).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        shield: bool,
+        /// Sustained rate limit (requests/sec, 0 = unlimited).
+        #[arg(long, default_value_t = 0.0)]
+        rps: f64,
+        /// Token-bucket burst depth (used with --rps).
+        #[arg(long, default_value_t = 100)]
+        burst: u32,
+        /// TLS cert PEM (enables native TLS termination on the ingress).
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+        /// TLS key PEM (requires --tls-cert).
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
+        /// Generate (and persist) a self-signed cert for instant HTTPS.
+        #[arg(long, conflicts_with_all = ["tls_cert", "tls_key"])]
+        tls_self_signed: bool,
         /// Max time the app gets to bind its port after spawn (ms).
         #[arg(long, default_value_t = 15_000)]
         startup_timeout_ms: u64,
@@ -142,6 +162,24 @@ enum Cmd {
         /// 85% evict oldest .zst FIFO / 95% survival shedding.
         #[arg(long, default_value_t = 4096)]
         disk_quota_mb: u64,
+        /// Scanner/WAF shield on the ingress (default on).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        shield: bool,
+        /// Sustained rate limit (requests/sec, 0 = unlimited).
+        #[arg(long, default_value_t = 0.0)]
+        rps: f64,
+        /// Token-bucket burst depth (used with --rps).
+        #[arg(long, default_value_t = 100)]
+        burst: u32,
+        /// TLS cert PEM (enables native TLS termination on the ingress).
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+        /// TLS key PEM (requires --tls-cert).
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
+        /// Generate (and persist) a self-signed cert for instant HTTPS.
+        #[arg(long, conflicts_with_all = ["tls_cert", "tls_key"])]
+        tls_self_signed: bool,
     },
     /// Deterministic time-travel replay of a recorded trace.
     Replay {
@@ -177,6 +215,31 @@ enum Cmd {
     /// Phase 6 verification gates: 1 = evicted cold-tier time-travel
     /// replay, 2 = bit-rot self-healing, 3 = bad-update canary rollback.
     P6Gate { n: u8 },
+    /// Phase 7 verification gates: 1 = shield (rate limit + WAF),
+    /// 2 = native TLS + hot reload, 3 = `blackbox demo --once`.
+    P7Gate { n: u8 },
+    /// The whole architecture in one shot: a self-contained demo node
+    /// (embedded app + LLM provider + mock S3 cold tier) driven through
+    /// normal traffic → coalesced LLM calls → webhook burst → a checkout
+    /// bug with a Sentry crash → automatic bit-rot self-heal, then the
+    /// 4-engine ANSI summary. Without --once the dashboard stays up.
+    Demo {
+        /// Run the scenario, print the summary and exit 0 (verification).
+        #[arg(long)]
+        once: bool,
+        /// Ingress bind (0 port = ephemeral).
+        #[arg(long, default_value = "127.0.0.1:0")]
+        listen: String,
+        /// Admin dashboard bind (falls back to an ephemeral port when busy).
+        #[arg(long, default_value = "127.0.0.1:9690")]
+        admin_listen: String,
+        /// Data dir (default: a fresh temp dir).
+        #[arg(long)]
+        data: Option<PathBuf>,
+        /// Keep the data dir after --once exits.
+        #[arg(long)]
+        keep: bool,
+    },
     /// Ed25519-verified canary self-update with automatic rollback
     /// (signature verify → redb snapshot → isolated canary → promote/rollback).
     SelfUpdate {
@@ -329,12 +392,19 @@ async fn main() -> Result<()> {
             webhooks,
             hold_ms,
             mem_budget_mb,
+            shield,
+            rps,
+            burst,
+            tls_cert,
+            tls_key,
+            tls_self_signed,
             startup_timeout_ms,
             max_restarts,
             pid_file,
             status_file,
             command,
         } => {
+            let tls = phase4::TlsOptions::from_flags(tls_cert, tls_key, tls_self_signed)?;
             run::run_node(run::RunArgs {
                 upstream_port,
                 listen,
@@ -349,6 +419,10 @@ async fn main() -> Result<()> {
                 pid_file,
                 status_file,
                 command,
+                shield,
+                rate_rps: rps,
+                rate_burst: burst,
+                tls,
             })
             .await?;
         }
@@ -390,8 +464,15 @@ async fn main() -> Result<()> {
             mem_budget_mb,
             max_segment_mb,
             disk_quota_mb,
+            shield,
+            rps,
+            burst,
+            tls_cert,
+            tls_key,
+            tls_self_signed,
         } => {
-            phase4::serve(
+            let tls = phase4::TlsOptions::from_flags(tls_cert, tls_key, tls_self_signed)?;
+            phase4::serve(phase4::NodeConfig {
                 listen,
                 upstream,
                 data,
@@ -402,7 +483,12 @@ async fn main() -> Result<()> {
                 mem_budget_mb,
                 max_segment_mb,
                 disk_quota_mb,
-            )
+                cold: None,
+                shield,
+                rate_rps: rps,
+                rate_burst: burst,
+                tls,
+            })
             .await?;
         }
         Cmd::Replay {
@@ -442,6 +528,31 @@ async fn main() -> Result<()> {
             3 => phase6::gate3().await?,
             _ => anyhow::bail!("p6gate must be 1, 2 or 3"),
         },
+        Cmd::P7Gate { n } => match n {
+            1 => phase7::gate1().await?,
+            2 => phase7::gate2().await?,
+            3 => phase7::gate3().await?,
+            _ => anyhow::bail!("p7gate must be 1, 2 or 3"),
+        },
+        Cmd::Demo {
+            once,
+            listen,
+            admin_listen,
+            data,
+            keep,
+        } => {
+            let code = demo::run_demo(demo::DemoArgs {
+                once,
+                listen,
+                admin_listen,
+                data,
+                keep,
+            })
+            .await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         Cmd::SelfUpdate {
             from,
             sig,

@@ -287,6 +287,11 @@ pub struct RunArgs {
     pub pid_file: Option<PathBuf>,
     pub status_file: Option<PathBuf>,
     pub command: Vec<String>,
+    /// Phase 7 pass-throughs (same semantics as `blackbox serve`).
+    pub shield: bool,
+    pub rate_rps: f64,
+    pub rate_burst: u32,
+    pub tls: crate::phase4::TlsOptions,
 }
 
 pub async fn run_node(args: RunArgs) -> Result<()> {
@@ -309,6 +314,10 @@ pub async fn run_node(args: RunArgs) -> Result<()> {
         cold: blackbox_cold::S3Config::from_env().and_then(|cfg| {
             blackbox_cold::ColdTier::open(cfg, &args.data).ok()
         }),
+        shield: args.shield,
+        rate_rps: args.rate_rps,
+        rate_burst: args.rate_burst,
+        tls: args.tls,
     })
     .await
     .context("boot blackbox node")?;

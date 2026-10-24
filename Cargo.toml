@@ -59,6 +59,12 @@ socket2 = "0.5"             # SO_REUSEADDR listeners (respawn-in-place after kil
 # --- Phase 4: zero-cert TLS egress (rustls, bundled webpki roots) ---
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring", "webpki-roots"] }
 
+# --- Phase 7: native TLS termination on the ingress (same ring provider) ---
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
+rustls-pemfile = "2"
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+
 # --- Phase 6: S3/R2 cold tier + Ed25519 canary self-update ---
 ed25519-dalek = "2"        # update-binary signature verification (tiny, no ring)
 
@@ -76,3 +82,5 @@ opt-level = 3
 debug = false
 strip = "debuginfo"        # final binary audit: keep symtab for panic backtraces, drop debuginfo
 panic = "unwind"           # supervisor must be able to catch panics in worker tasks
+lto = "thin"               # v1.2: TLS server stack joined — keep the <21 MB red line
+codegen-units = 1

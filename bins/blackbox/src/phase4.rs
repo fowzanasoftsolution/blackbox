@@ -5,6 +5,9 @@
 use anyhow::{Context, Result};
 use blackbox_egress::EgressHandle;
 use blackbox_ingress::proxy::ProxyHandle;
+use blackbox_ingress::rate_limit::{RateLimiter, RateLimiterConfig};
+use blackbox_ingress::tls;
+use blackbox_ingress::waf::ScannerShield;
 use blackbox_queue::QueueRuntime;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,7 +15,41 @@ use std::time::{Duration, Instant};
 
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
-/// Full-node configuration (Phase 5 adds segment + disk-quota knobs).
+/// Phase 7: how the ingress listener terminates TLS.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum TlsOptions {
+    /// Plain HTTP (behind your own edge, or the Phase 2 bench default).
+    #[default]
+    Off,
+    /// Terminate TLS with these PEM files; hot-reloaded on change.
+    Files { cert: PathBuf, key: PathBuf },
+    /// Generate (or reuse) a self-signed cert under `<data>/tls/`.
+    SelfSigned,
+}
+
+impl TlsOptions {
+    /// CLI flag resolution: explicit cert+key wins, else self-signed, else
+    /// plain HTTP. Errors when the pair is half-specified.
+    pub fn from_flags(
+        cert: Option<PathBuf>,
+        key: Option<PathBuf>,
+        self_signed: bool,
+    ) -> anyhow::Result<Self> {
+        match (cert, key) {
+            (Some(cert), Some(key)) => Ok(TlsOptions::Files { cert, key }),
+            (Some(_), None) => anyhow::bail!("--tls-cert given without --tls-key"),
+            (None, Some(_)) => anyhow::bail!("--tls-key given without --tls-cert"),
+            (None, None) => Ok(if self_signed {
+                TlsOptions::SelfSigned
+            } else {
+                TlsOptions::Off
+            }),
+        }
+    }
+}
+
+/// Full-node configuration (Phase 5 adds segment + disk-quota knobs,
+/// Phase 7 adds the request guard + native TLS).
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
     pub listen: String,
@@ -29,6 +66,14 @@ pub struct NodeConfig {
     pub disk_quota_mb: u64,
     /// Phase 6: S3/R2 cold tier (None = local-only retention).
     pub cold: Option<Arc<blackbox_cold::ColdTier>>,
+    /// Phase 7: scanner/WAF shield on the ingress (default ON).
+    pub shield: bool,
+    /// Phase 7: sustained rate limit (requests/sec; 0 = unlimited).
+    pub rate_rps: f64,
+    /// Phase 7: token-bucket burst depth (default 100).
+    pub rate_burst: u32,
+    /// Phase 7: native TLS termination on the ingress listener.
+    pub tls: TlsOptions,
 }
 
 impl Default for NodeConfig {
@@ -45,6 +90,10 @@ impl Default for NodeConfig {
             max_segment_mb: 64,
             disk_quota_mb: 4096,
             cold: None,
+            shield: true,
+            rate_rps: 0.0,
+            rate_burst: 100,
+            tls: TlsOptions::Off,
         }
     }
 }
@@ -62,6 +111,12 @@ pub struct NodeHandle {
     pub disk: Arc<blackbox_supervisor::disk::DiskMonitor>,
     pub compactor: Arc<blackbox_core::compactor::CompactorStats>,
     pub cold: Option<Arc<blackbox_cold::ColdTier>>,
+    /// Phase 7: live TLS state (None = plain HTTP ingress).
+    pub tls: Option<Arc<tls::TlsState>>,
+    /// Phase 7: the live rate limiter (None = unlimited).
+    pub rate_limiter: Option<Arc<RateLimiter>>,
+    /// Phase 7: whether the scanner shield is active.
+    pub shield_enabled: bool,
 }
 
 /// Everything the admin API reports on.
@@ -78,6 +133,11 @@ pub struct AdminState {
     pub max_segment_bytes: u64,
     pub compactor: Option<Arc<blackbox_core::compactor::CompactorStats>>,
     pub cold: Option<Arc<blackbox_cold::ColdTier>>,
+    /// Phase 7: guard telemetry for /api/stats.
+    pub shield_enabled: bool,
+    pub rate_limiter: Option<Arc<RateLimiter>>,
+    pub tls_enabled: bool,
+    pub tls_reload_paths: Option<(PathBuf, PathBuf)>,
 }
 
 /// Spawn the whole node (returns as soon as every listener is bound).
@@ -86,6 +146,21 @@ pub async fn spawn_node(cfg: NodeConfig) -> Result<NodeHandle> {
     // `blackbox run --data ./fresh` must just work).
     std::fs::create_dir_all(&cfg.data).context("create data dir")?;
     let health = blackbox_core::breaker::UpstreamHealth::new(3);
+
+    // ---- Phase 7: native TLS termination (before the ingress boots). ---
+    let tls_state: Option<Arc<tls::TlsState>> = match &cfg.tls {
+        TlsOptions::Off => None,
+        TlsOptions::Files { cert, key } => {
+            let s = tls::from_files(cert, key).context("load TLS cert/key")?;
+            tls::spawn_hot_reload(Arc::clone(&s));
+            Some(s)
+        }
+        TlsOptions::SelfSigned => {
+            let s = tls::from_self_signed(&cfg.data).context("generate self-signed TLS")?;
+            Some(s)
+        }
+    };
+    let rate_limiter = RateLimiter::new(&RateLimiterConfig::from_rps(cfg.rate_rps, cfg.rate_burst)).map(Arc::new);
 
     // ---- Queue runtime (dispatcher + reaper + JobStore actor). ----------
     let (events_tx, events_rx) = tokio::sync::mpsc::channel(4_096);
@@ -119,6 +194,9 @@ pub async fn spawn_node(cfg: NodeConfig) -> Result<NodeHandle> {
         }),
         max_segment_bytes: cfg.max_segment_mb.saturating_mul(1024 * 1024),
         cold: cfg.cold.clone(),
+        shield: if cfg.shield { ScannerShield::enabled() } else { ScannerShield::disabled() },
+        rate_limit: rate_limiter.clone(),
+        tls: tls_state.clone(),
         ..Default::default()
     };
     let proxy = blackbox_ingress::proxy::spawn_proxy(proxy_cfg).await?;
@@ -198,6 +276,10 @@ pub async fn spawn_node(cfg: NodeConfig) -> Result<NodeHandle> {
         max_segment_bytes: cfg.max_segment_mb.saturating_mul(1024 * 1024),
         compactor: Some(Arc::clone(&compactor)),
         cold: cfg.cold.clone(),
+        shield_enabled: cfg.shield,
+        rate_limiter: rate_limiter.clone(),
+        tls_enabled: tls_state.is_some(),
+        tls_reload_paths: tls_state.as_ref().and_then(|t| t.watch_paths().cloned()),
     });
     let admin_bind = admin::spawn(admin_addr, admin_state)
         .await
@@ -215,48 +297,52 @@ pub async fn spawn_node(cfg: NodeConfig) -> Result<NodeHandle> {
         disk,
         compactor,
         cold: cold_for_handle,
+        tls: tls_state,
+        rate_limiter,
+        shield_enabled: cfg.shield,
     })
 }
 
-/// `blackbox serve` — v1.0+ full node (foreground; Ctrl-C to stop).
-#[allow(clippy::too_many_arguments)]
-pub async fn serve(
-    listen: String,
-    upstream: String,
-    data: PathBuf,
-    webhooks: String,
-    hold_ms: u64,
-    egress_listen: String,
-    admin_listen: String,
-    mem_budget_mb: u64,
-    max_segment_mb: u64,
-    disk_quota_mb: u64,
-) -> Result<()> {
-    // Phase 6: S3/R2 cold tier from BLACKBOX_COLD_* env (None = off).
-    let cfg_data = data;
-    let cold = blackbox_cold::S3Config::from_env().and_then(|cfg| {
-        blackbox_cold::ColdTier::open(cfg, &cfg_data).ok()
+/// `blackbox serve` — v1.2+ full node (foreground; Ctrl-C to stop).
+pub async fn serve(cfg: NodeConfig) -> Result<()> {
+    // Phase 6: S3/R2 cold tier from BLACKBOX_COLD_* env when the caller
+    // did not attach one explicitly.
+    let cold = cfg.cold.clone().or_else(|| {
+        blackbox_cold::S3Config::from_env().and_then(|s3| blackbox_cold::ColdTier::open(s3, &cfg.data).ok())
     });
-    let node = spawn_node(NodeConfig {
-        listen,
-        upstream: upstream.clone(),
-        data: cfg_data,
-        webhooks,
-        hold_ms,
-        egress_listen,
-        admin_listen,
-        mem_budget_mb,
-        max_segment_mb,
-        disk_quota_mb,
-        cold,
-    })
-    .await?;
+    let upstream = cfg.upstream.clone();
+    let tls_opts = cfg.tls.clone();
+    let node = spawn_node(NodeConfig { cold, ..cfg }).await?;
 
+    let scheme = if node.tls.is_some() { "https" } else { "http" };
     println!(
-        "blackbox v1.1 node listening on http://{} (upstream {})",
+        "blackbox v1.2 node listening on {scheme}://{} (upstream {})",
         node.proxy.local_addr, upstream
     );
     println!("  ingress:    reverse proxy + /webhooks,/jobs durable 202s + Sentry/OTLP ingestion");
+    match (&node.tls, &tls_opts) {
+        (Some(_), TlsOptions::Files { cert, key }) => println!(
+            "  tls:        ON (cert {} · key {} · hot reload every 2s)",
+            cert.display(),
+            key.display()
+        ),
+        (Some(_), TlsOptions::SelfSigned) => println!(
+            "  tls:        ON (self-signed, persisted under {}/tls/ — clients must trust or skip verify)",
+            node.data_dir.display()
+        ),
+        _ => {}
+    }
+    if node.shield_enabled {
+        println!("  shield:     scanner/WAF filter ON (blocks /.env /.git wp-admin traversal) — disable with --no-shield");
+    }
+    match &node.rate_limiter {
+        Some(rl) => println!(
+            "  rate limit: {:.1} req/s sustained · burst {} · 429 + Retry-After",
+            rl.rps_milli() as f64 / 1000.0,
+            rl.burst()
+        ),
+        None => println!("  rate limit: OFF (--rps N --burst M to enable)"),
+    }
     println!(
         "  egress:     set OPENAI_BASE_URL=http://{} (aliases /v1/*), X-Blackbox-Target, or HTTP_PROXY",
         node.egress.local_addr
@@ -473,6 +559,15 @@ pub mod admin {
                 "status_5xx": idx.status_5xx,
                 "sentry_crashes": idx.sentry_crashes,
                 "distinct_traces": idx.distinct_traces,
+            },
+            "guard": {
+                "shield": state.shield_enabled,
+                "blocked_attacks": blackbox_ingress::waf::blocked_attacks(),
+                "rate_limited": blackbox_ingress::proxy::RATE_LIMITED.load(std::sync::atomic::Ordering::Relaxed),
+                "rate_rps_milli": state.rate_limiter.as_ref().map(|r| r.rps_milli()).unwrap_or(0),
+                "rate_burst": state.rate_limiter.as_ref().map(|r| r.burst()).unwrap_or(0),
+                "tls": state.tls_enabled,
+                "tls_reload_paths": state.tls_reload_paths.as_ref().map(|(c, k)| serde_json::json!({"cert": c.display().to_string(), "key": k.display().to_string()})),
             },
             "ram": {
                 "level": format!("{level:?}"),

@@ -19,6 +19,12 @@
 //!   bloom fast-negative path; rebuilt from the startup recovery scan.
 //! - [`durable`] — Phase 3 durable webhook ingestion: raw-byte-preserving
 //!   202 path (HMAC-safe), idempotency dedup, scrubbed telemetry copy.
+//! - [`rate_limit`] — Phase 7 sharded lock-free token-bucket rate limiter
+//!   (429 + Retry-After before the upstream or disk is touched).
+//! - [`waf`] — Phase 7 scanner/WAF shield: instant drop of /.env, /.git,
+//!   wp-admin, path traversal, … (counted, never recorded).
+//! - [`tls`] — Phase 7 native TLS termination (tokio-rustls) with zero-
+//!   downtime certificate hot reload.
 //! - [`traceparent`] — W3C Trace Context parsing/generation.
 //! - [`verify`] — Phase 2 gate harness: end-to-end causal-link test, stream
 //!   & bomb-safety test, and the 2-vCPU throughput/latency benchmark.
@@ -28,11 +34,14 @@
 pub mod durable;
 pub mod index;
 pub mod proxy;
+pub mod rate_limit;
 pub mod scrub;
 pub mod tee;
+pub mod tls;
 pub mod traceparent;
 pub mod verify;
 pub mod verify3;
+pub mod waf;
 pub mod writer;
 
 /// Crate identity tag.

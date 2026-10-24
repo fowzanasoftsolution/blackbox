@@ -16,9 +16,12 @@
 
 use crate::durable::{handle_durable, matches_durable, DurableCtx};
 use crate::index::{IndexStats, TraceIndex};
+use crate::rate_limit::{Decision, RateLimiter};
 use crate::scrub::Scrubber;
 use crate::tee::{capture_policy, CaptureBuf, Finalizer, TeeBody, CAPTURE_MAX_BYTES, CapturePolicy};
+use crate::tls::TlsState;
 use crate::traceparent::{Traceparent, TRACEPARENT_HEADER, TRACE_ID_RESPONSE_HEADER};
+use crate::waf::ScannerShield;
 use crate::writer::{RecordSink, WriterConfig};
 use blackbox_core::breaker::UpstreamHealth;
 use blackbox_core::schema::{
@@ -52,6 +55,9 @@ pub static SAMPLED_OUT: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 /// (overlaps SAMPLED_OUT when both levels are active — disjoint counting
 /// happens in the Finalizer).
 pub static DISK_SHED_OUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Phase 7: requests rejected with 429 by the sharded token-bucket limiter.
+pub static RATE_LIMITED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Hop-by-hop headers never forwarded (RFC 9110 §7.6.1).
 const HOP_BY_HOP: &[&str] = &[
@@ -110,6 +116,13 @@ pub struct IngressConfig {
     /// Phase 6: S3/R2 cold tier — transparent evicted-segment restore +
     /// bit-rot self-heal in `get_trace` (None = local-only retention).
     pub cold: Option<Arc<blackbox_cold::ColdTier>>,
+    /// Phase 7: scanner/WAF shield (default OFF for library tests; the
+    /// CLI turns it ON unless `--no-shield`).
+    pub shield: ScannerShield,
+    /// Phase 7: sharded token-bucket rate limiter (None = unlimited).
+    pub rate_limit: Option<Arc<RateLimiter>>,
+    /// Phase 7: native TLS termination (None = plain HTTP listener).
+    pub tls: Option<Arc<TlsState>>,
 }
 
 impl Default for IngressConfig {
@@ -135,6 +148,9 @@ impl Default for IngressConfig {
             replay_trace: None,
             max_segment_bytes: blackbox_core::segment::DEFAULT_MAX_SEGMENT_BYTES,
             cold: None,
+            shield: ScannerShield::disabled(),
+            rate_limit: None,
+            tls: None,
         }
     }
 }
@@ -189,6 +205,9 @@ pub(crate) struct ProxyCtx {
     hold_window: Duration,
     durable: Option<Arc<DurableCtx>>,
     replay_trace: Option<TraceId>,
+    /// Phase 7: request guard (scanner shield + optional rate limiter).
+    pub(crate) shield: ScannerShield,
+    pub(crate) rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 /// Handle for tests / the CLI: query the live index and writer state.
@@ -372,12 +391,15 @@ pub async fn spawn_proxy(cfg: IngressConfig) -> Result<ProxyHandle, StorageError
         durable,
         replay_trace: cfg.replay_trace,
         health,
+        shield: cfg.shield,
+        rate_limiter: cfg.rate_limit.clone(),
     });
 
     let ctx_for_loop = ctx.clone();
+    let tls_for_loop = cfg.tls.clone();
     tokio::spawn(async move {
         loop {
-            let (tcp, _peer) = match listener.accept().await {
+            let (tcp, peer) = match listener.accept().await {
                 Ok(x) => x,
                 Err(e) => {
                     tracing::warn!(error = %e, "accept failed");
@@ -387,16 +409,35 @@ pub async fn spawn_proxy(cfg: IngressConfig) -> Result<ProxyHandle, StorageError
             // Zero-blocking hot path: TCP_NODELAY on the accepted socket.
             let _ = tcp.set_nodelay(true);
             let ctx = ctx_for_loop.clone();
+            let tls = tls_for_loop.clone();
             tokio::spawn(async move {
-                // tower service bridged into hyper's Service trait.
-                let tower_svc = tower::service_fn(move |req: hyper::Request<Incoming>| {
+                // Phase 7: native TLS termination when configured — the
+                // handshake runs on this task, the hot path stays identical
+                // below it (plain vs TLS is just which IO feeds hyper).
+                let io: ProxyIo = match &tls {
+                    Some(t) => {
+                        let acceptor = t.acceptor();
+                        match acceptor.accept(tcp).await {
+                            Ok(s) => ProxyIo::Tls(s),
+                            Err(e) => {
+                                tracing::debug!(error = %e, "tls handshake failed");
+                                return;
+                            }
+                        }
+                    }
+                    None => ProxyIo::Plain(tcp),
+                };
+                // tower service bridged into hyper's Service trait. The
+                // peer address rides in the request extensions for the
+                // Phase 7 guard (rate-limit key when no forwarded header).
+                let tower_svc = tower::service_fn(move |mut req: hyper::Request<Incoming>| {
+                    req.extensions_mut().insert(peer);
                     let ctx = ctx.clone();
                     async move { Ok::<_, std::convert::Infallible>(route(req, ctx).await) }
                 });
                 let svc = hyper_util::service::TowerToHyperService::new(tower_svc);
-                let io = TokioIo::new(tcp);
                 if let Err(e) = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(io, svc)
+                    .serve_connection(TokioIo::new(io), svc)
                     .with_upgrades()
                     .await
                 {
@@ -407,6 +448,59 @@ pub async fn spawn_proxy(cfg: IngressConfig) -> Result<ProxyHandle, StorageError
     });
 
     Ok(ProxyHandle { local_addr, sink, index, active_segments })
+}
+
+/// Listener IO after optional TLS termination (both legs are Unpin, the
+/// impls are pure delegation).
+enum ProxyIo {
+    Plain(tokio::net::TcpStream),
+    Tls(tokio_rustls::server::TlsStream<tokio::net::TcpStream>),
+}
+
+impl tokio::io::AsyncRead for ProxyIo {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ProxyIo::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            ProxyIo::Tls(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for ProxyIo {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            ProxyIo::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            ProxyIo::Tls(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ProxyIo::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
+            ProxyIo::Tls(s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ProxyIo::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            ProxyIo::Tls(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
+    }
 }
 
 fn spawn_writer_task(cfg: &IngressConfig) -> (RecordSink, Arc<RwLock<TraceIndex>>, tokio::sync::watch::Receiver<u32>, tokio::task::JoinHandle<u64>) {
@@ -425,6 +519,40 @@ fn spawn_writer_task(cfg: &IngressConfig) -> (RecordSink, Arc<RwLock<TraceIndex>
 async fn route(req: hyper::Request<Incoming>, ctx: Arc<ProxyCtx>) -> hyper::Response<ProxyBody> {
     PROXY_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = req.uri().path().to_string();
+
+    // --- Phase 7: scanner/WAF shield — instant drop, zero side effects.
+    //     Runs before the rate limiter so probe noise never burns token
+    //     budget, and before every route so attack traffic never reaches
+    //     the upstream app, the queue actor or the segment store.
+    if ctx.shield.check(&path).is_some() {
+        return full_response(
+            http::StatusCode::from_u16(crate::waf::SHIELD_STATUS)
+                .unwrap_or(http::StatusCode::NOT_FOUND),
+            vec![],
+            Bytes::from_static(crate::waf::SHIELD_BODY.as_bytes()),
+        );
+    }
+
+    // --- Phase 7: sharded lock-free token bucket. Rejects BEFORE the
+    //     upstream or disk sees the request; 429 + Retry-After.
+    if let Some(rl) = &ctx.rate_limiter {
+        let key = guard_key(&req);
+        if let Decision::Limited { retry_after_ms } = rl.check(&key) {
+            RATE_LIMITED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return full_response(
+                http::StatusCode::TOO_MANY_REQUESTS,
+                vec![
+                    ("retry-after", retry_after_ms.div_ceil(1000).to_string()),
+                    (
+                        "x-blackbox-retry-after-ms",
+                        retry_after_ms.to_string(),
+                    ),
+                ],
+                Bytes::from_static(b"rate limited by blackbox shield\n"),
+            );
+        }
+    }
+
     let segments: Vec<&str> = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
 
     // Sentry wire-compatible: /api/{project_id}/envelope/ (trailing slash optional).
@@ -897,6 +1025,42 @@ fn build_upstream_uri(orig: &Uri, upstream: &str) -> Result<Uri, BoxError> {
 
 fn is_hop_by_hop(name: &HeaderName) -> bool {
     HOP_BY_HOP.contains(&name.as_str())
+}
+
+/// Phase 7: client identity for the rate limiter. API key first (fair
+/// multi-tenant limits behind shared NAT), then the leftmost
+/// `X-Forwarded-For` hop (the original client as seen by the edge), then
+/// the socket peer address.
+fn guard_key(req: &hyper::Request<Incoming>) -> Vec<u8> {
+    if let Some(k) = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+    {
+        let mut out = Vec::with_capacity(k.len() + 4);
+        out.extend_from_slice(b"key:");
+        out.extend_from_slice(k.as_bytes());
+        return out;
+    }
+    if let Some(fwd) = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(hop) = fwd.split(',').next() {
+            let hop = hop.trim();
+            if !hop.is_empty() {
+                let mut out = Vec::with_capacity(hop.len() + 3);
+                out.extend_from_slice(b"ip:");
+                out.extend_from_slice(hop.as_bytes());
+                return out;
+            }
+        }
+    }
+    if let Some(peer) = req.extensions().get::<SocketAddr>() {
+        return format!("ip:{}", peer.ip()).into_bytes();
+    }
+    b"ip:unknown".to_vec()
 }
 
 /// Forward request headers, dropping hop-by-hop + framing headers hyper
