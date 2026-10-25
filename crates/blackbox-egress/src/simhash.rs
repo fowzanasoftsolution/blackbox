@@ -36,7 +36,7 @@
 //!
 //! No crates, no models: FNV-1a shingle fingerprints + popcount lookup —
 //! the whole pipeline is sub-5 µs for typical prompts on x86_64 (gated in
-//! [`crate::verify5`]). The shingle hash is deliberately FNV-1a, NOT
+//! [`crate::gates_phase4`]). The shingle hash is deliberately FNV-1a, NOT
 //! crypto: a collision only adds ±1 weight noise to a bit, which is noise
 //! by design in a similarity oracle.
 
@@ -324,7 +324,7 @@ const MAX_SHINGLES: usize = 4_096;
 ///
 /// The bit scatter is branchless (`acc[i] += bit`) and the shingle hash
 /// allocation-free: together they keep the whole pipeline under the 5 µs
-/// per-prompt budget for typical prompts (gated in [`crate::verify5`]).
+/// per-prompt budget for typical prompts (gated in [`crate::gates_phase4`]).
 pub fn simhash_text(text: &str) -> u64 {
     let tokens: Vec<&str> = text.split(' ').filter(|t| !t.is_empty()).collect();
     if tokens.is_empty() {

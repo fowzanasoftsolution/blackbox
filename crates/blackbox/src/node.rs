@@ -246,7 +246,7 @@ pub async fn spawn_node(cfg: NodeConfig) -> Result<NodeHandle> {
         cfg.disk_quota_mb.saturating_mul(1024 * 1024),
     ));
     let compactor = blackbox_core::compactor::CompactorStats::new();
-    crate::phase5::spawn_storage_janitor(
+    crate::janitor::spawn_storage_janitor(
         cfg.data.clone(),
         proxy.active_segments.clone(),
         Arc::clone(&disk),

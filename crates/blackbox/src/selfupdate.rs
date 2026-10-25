@@ -84,8 +84,8 @@ pub fn keygen(out_dir: &Path) -> Result<PathBuf> {
     let (sk, vk) = generate_keypair()?;
     let sk_path = out_dir.join("blackbox_ed25519.key");
     let vk_path = out_dir.join("blackbox_ed25519.pub");
-    std::fs::write(&sk_path, crate::phase6::hex_of(&sk.to_bytes()))?;
-    std::fs::write(&vk_path, crate::phase6::hex_of(&vk.to_bytes()))?;
+    std::fs::write(&sk_path, crate::util::hex_of(&sk.to_bytes()))?;
+    std::fs::write(&vk_path, crate::util::hex_of(&vk.to_bytes()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -104,7 +104,7 @@ pub fn load_signing_key(spec: &str) -> Result<SigningKey> {
     } else {
         spec.to_string()
     };
-    let bytes = crate::phase6::hex_bytes(hex.trim())
+    let bytes = crate::util::hex_bytes(hex.trim())
         .ok_or_else(|| anyhow!("key must be 64 hex chars (ed25519 seed)"))?;
     let arr: [u8; 32] = bytes
         .try_into()
@@ -125,7 +125,7 @@ pub fn resolve_verifying_key(explicit: Option<&str>, data_dir: &Path) -> Result<
             std::fs::read_to_string(&p).ok().map(|s| (p, s)).map(|(_, s)| s)
         })
         .unwrap_or_else(|| RELEASE_VERIFY_KEY.to_string());
-    let bytes = crate::phase6::hex_bytes(hex_opt.trim())
+    let bytes = crate::util::hex_bytes(hex_opt.trim())
         .ok_or_else(|| anyhow!("public key must be 64 hex chars"))?;
     let arr: [u8; 32] = bytes
         .try_into()
@@ -136,13 +136,13 @@ pub fn resolve_verifying_key(explicit: Option<&str>, data_dir: &Path) -> Result<
 /// Sign SHA-256(candidate) with the signing key → 128-hex signature.
 pub fn sign_bytes(sk: &SigningKey, candidate: &[u8]) -> String {
     let digest = Sha256::digest(candidate);
-    crate::phase6::hex_of(&sk.sign(&digest).to_bytes())
+    crate::util::hex_of(&sk.sign(&digest).to_bytes())
 }
 
 /// Verify the signature over SHA-256(candidate). Returns the verifying key
 /// match as `Result` — an `Err` here is the instant-rejection path.
 pub fn verify_signature(vk: &VerifyingKey, candidate: &[u8], sig_hex: &str) -> Result<()> {
-    let bytes = crate::phase6::hex_bytes(sig_hex.trim())
+    let bytes = crate::util::hex_bytes(sig_hex.trim())
         .ok_or_else(|| anyhow!("signature must be 128 hex chars"))?;
     let arr: [u8; 64] = bytes
         .try_into()
@@ -536,7 +536,7 @@ pub async fn self_test(canary_port: u16, data: PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::phase6::hex_of;
+    use crate::util::hex_of;
     use std::sync::Mutex;
 
     /// Env vars are process-global and tests run in parallel threads —

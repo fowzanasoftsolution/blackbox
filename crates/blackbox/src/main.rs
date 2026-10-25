@@ -1,21 +1,26 @@
 //! Project Blackbox — the Rust "Omni-Sidecar" CLI.
 //!
-//! Phase 1 deliverables live here: the crash & corruption harness
-//! (`harness corrupt|kill9|rss`) and the storage-core benchmarks
-//! (`bench segment|queue`).
+//! Command plumbing for every engine: node assembly, the zero-config run
+//! wrapper, the trusted self-update path, the demo, the storage-core
+//! benchmarks and the phase-1..7 verification gates. Module names follow
+//! the system, not the history: `gates_phase<n>` files hold the
+//! verification harnesses, `node`/`ops`/`janitor`/`util` hold the shipped
+//! plumbing they exercise.
 
 mod bench;
 mod child;
 mod demo;
-mod harness;
-mod phase3;
-mod phase4;
-mod phase5;
-mod phase6;
-mod phase7;
+mod gates_phase1;
+mod gates_phase5;
+mod gates_phase6;
+mod gates_phase7;
+mod janitor;
+mod node;
+mod ops;
 mod run;
 mod selfupdate;
 mod stats;
+mod util;
 
 use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
@@ -448,7 +453,7 @@ async fn main() -> Result<()> {
             status_file,
             command,
         } => {
-            let tls = phase4::TlsOptions::from_flags(tls_cert, tls_key, tls_self_signed)?;
+            let tls = node::TlsOptions::from_flags(tls_cert, tls_key, tls_self_signed)?;
             run::run_node(run::RunArgs {
                 upstream_port,
                 listen,
@@ -471,20 +476,20 @@ async fn main() -> Result<()> {
             .await?;
         }
         Cmd::EnvChild { port, env_file } => {
-            phase5::env_child(port, env_file).await?;
+            ops::env_child(port, env_file).await?;
         }
         Cmd::Harness { mode } => match mode {
             HarnessMode::Corrupt { frames, seed, mode } => {
                 if !matches!(mode.as_str(), "torn" | "flip" | "both") {
                     anyhow::bail!("--mode must be torn|flip|both");
                 }
-                harness::run_corrupt(frames, seed, &mode)?;
+                gates_phase1::run_corrupt(frames, seed, &mode)?;
             }
             HarnessMode::Kill9 { records, iterations, seed } => {
-                harness::run_kill9(records, iterations, seed)?;
+                gates_phase1::run_kill9(records, iterations, seed)?;
             }
             HarnessMode::Rss { budget_mb } => {
-                harness::run_rss(budget_mb)?;
+                gates_phase1::run_rss(budget_mb)?;
             }
         },
         Cmd::Bench { mode } => match mode {
@@ -493,7 +498,7 @@ async fn main() -> Result<()> {
             BenchMode::Proxy {
                 requests,
                 concurrency,
-            } => blackbox_ingress::verify::gate3(requests, concurrency)
+            } => blackbox_ingress::gates_phase2::gate3(requests, concurrency)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?,
         },
@@ -515,8 +520,8 @@ async fn main() -> Result<()> {
             tls_key,
             tls_self_signed,
         } => {
-            let tls = phase4::TlsOptions::from_flags(tls_cert, tls_key, tls_self_signed)?;
-            phase4::serve(phase4::NodeConfig {
+            let tls = node::TlsOptions::from_flags(tls_cert, tls_key, tls_self_signed)?;
+            node::serve(node::NodeConfig {
                 listen,
                 upstream,
                 data,
@@ -543,11 +548,11 @@ async fn main() -> Result<()> {
             egress,
             data_copy,
         } => {
-            phase3::replay(trace_id, target, data, listen, egress, data_copy).await?;
+            ops::replay(trace_id, target, data, listen, egress, data_copy).await?;
         }
         Cmd::Queue { mode } => match mode {
-            QueueMode::Status { data } => phase3::queue_status(data).await?,
-            QueueMode::RetryDlq { data } => phase3::queue_retry_dlq(data).await?,
+            QueueMode::Status { data } => ops::queue_status(data).await?,
+            QueueMode::RetryDlq { data } => ops::queue_retry_dlq(data).await?,
         },
         Cmd::Audit { mode } => match mode {
             AuditMode::Verify { data, anchor } => {
@@ -586,38 +591,38 @@ async fn main() -> Result<()> {
             }
         },
         Cmd::P3Gate { n } => match n {
-            1 => blackbox_ingress::verify3::gate1().await.map_err(|e| anyhow::anyhow!("{e}"))?,
-            2 => blackbox_ingress::verify3::gate2().await.map_err(|e| anyhow::anyhow!("{e}"))?,
-            3 => blackbox_ingress::verify3::gate3().await.map_err(|e| anyhow::anyhow!("{e}"))?,
+            1 => blackbox_ingress::gates_phase3::gate1().await.map_err(|e| anyhow::anyhow!("{e}"))?,
+            2 => blackbox_ingress::gates_phase3::gate2().await.map_err(|e| anyhow::anyhow!("{e}"))?,
+            3 => blackbox_ingress::gates_phase3::gate3().await.map_err(|e| anyhow::anyhow!("{e}"))?,
             _ => anyhow::bail!("p3gate must be 1, 2 or 3"),
         },
         Cmd::P4Gate { n } => match n {
             1 => blackbox_egress::gate1().await.map_err(|e| anyhow::anyhow!("{e}"))?,
             2 => blackbox_egress::gate2().await.map_err(|e| anyhow::anyhow!("{e}"))?,
             3 => blackbox_egress::gate3().await.map_err(|e| anyhow::anyhow!("{e}"))?,
-            4 => blackbox_egress::verify5::gate_near()
+            4 => blackbox_egress::gates_phase4::gate_near()
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?,
-            5 => blackbox_egress::verify5::gate_audit()
+            5 => blackbox_egress::gates_phase4::gate_audit()
                 .map_err(|e| anyhow::anyhow!("{e}"))?,
             _ => anyhow::bail!("p4gate must be 1..5"),
         },
         Cmd::P5Gate { n } => match n {
-            1 => phase5::gate1().await?,
-            2 => phase5::gate2().await?,
-            3 => phase5::gate3().await?,
+            1 => gates_phase5::gate1().await?,
+            2 => gates_phase5::gate2().await?,
+            3 => gates_phase5::gate3().await?,
             _ => anyhow::bail!("p5gate must be 1, 2 or 3"),
         },
         Cmd::P6Gate { n } => match n {
-            1 => phase6::gate1().await?,
-            2 => phase6::gate2().await?,
-            3 => phase6::gate3().await?,
+            1 => gates_phase6::gate1().await?,
+            2 => gates_phase6::gate2().await?,
+            3 => gates_phase6::gate3().await?,
             _ => anyhow::bail!("p6gate must be 1, 2 or 3"),
         },
         Cmd::P7Gate { n } => match n {
-            1 => phase7::gate1().await?,
-            2 => phase7::gate2().await?,
-            3 => phase7::gate3().await?,
+            1 => gates_phase7::gate1().await?,
+            2 => gates_phase7::gate2().await?,
+            3 => gates_phase7::gate3().await?,
             _ => anyhow::bail!("p7gate must be 1, 2 or 3"),
         },
         Cmd::Demo {
@@ -675,7 +680,7 @@ async fn main() -> Result<()> {
             println!("signed {} → {} (128-hex Ed25519 over SHA-256)", input.display(), out.display());
             // Release CI signs with a secret seed and publishes this line as the
             // public verifying key operators can pin for `blackbox self-update`.
-            println!("verifying-key: {}", crate::phase6::hex_of(&sk.verifying_key().to_bytes()));
+            println!("verifying-key: {}", crate::util::hex_of(&sk.verifying_key().to_bytes()));
         }
         Cmd::SelfTest {
             canary_port,
@@ -688,10 +693,10 @@ async fn main() -> Result<()> {
             println!("restored {n} snapshot file(s) over their live databases");
         }
         Cmd::Gate { n } => match n {
-            1 => blackbox_ingress::verify::gate1().await.map_err(|e| anyhow::anyhow!(e))?,
-            2 => blackbox_ingress::verify::gate2().await.map_err(|e| anyhow::anyhow!(e))?,
+            1 => blackbox_ingress::gates_phase2::gate1().await.map_err(|e| anyhow::anyhow!(e))?,
+            2 => blackbox_ingress::gates_phase2::gate2().await.map_err(|e| anyhow::anyhow!(e))?,
             3 => {
-                blackbox_ingress::verify::gate3(30_000, 8)
+                blackbox_ingress::gates_phase2::gate3(30_000, 8)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?
             }

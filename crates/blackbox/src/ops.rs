@@ -1,101 +1,17 @@
-//! Phase 3 CLI plumbing: full node assembly for `serve`, the deterministic
-//! replay launcher, and the offline queue admin commands.
+//! Operational command plumbing: the deterministic replay launcher, the
+//! offline queue administration commands, the shared circuit breaker and
+//! the injectable-env stand-in app behind `blackbox env-child`.
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper_util::rt::TokioIo;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// One shared circuit breaker across ingress + queue + interceptor.
 pub fn shared_breaker(threshold: u32) -> Arc<blackbox_core::breaker::UpstreamHealth> {
     blackbox_core::breaker::UpstreamHealth::new(threshold)
-}
-
-/// (Superseded by phase4::serve — kept for reference / quick rollback.)
-#[allow(dead_code)]
-pub async fn serve(
-    listen: String,
-    upstream: String,
-    data: PathBuf,
-    webhooks: String,
-    hold_ms: u64,
-    egress_listen: String,
-) -> Result<()> {
-    let health = shared_breaker(3);
-
-    // Queue runtime (dispatcher + reaper + JobStore actor).
-    let (events_tx, events_rx) = tokio::sync::mpsc::channel(4_096);
-    let dispatcher_cfg = blackbox_queue::DispatcherConfig {
-        upstream: upstream.clone(),
-        ..Default::default()
-    };
-    let runtime = blackbox_queue::spawn_queue_runtime(
-        &data.join("jobs.redb"),
-        blackbox_queue::JobStoreConfig::default(),
-        dispatcher_cfg,
-        Arc::clone(&health),
-        Some(events_tx),
-    )
-    .await
-    .context("spawn queue runtime")?;
-
-    // Egress record interceptor (forward-proxy listener).
-    let sink_ref: Arc<dyn Fn(blackbox_core::schema::TraceRecord) + Send + Sync> = {
-        // The interceptor is spawned by replay/serve via blackbox_queue; here we
-        // only print its address — recording goes through the ingress writer.
-        // (Records are emitted by the interceptor's emit callback below.)
-        Arc::new(|_| {})
-    };
-    let _ = sink_ref; // placeholder — the real emit is wired to the proxy sink below
-
-    let proxy_cfg = blackbox_ingress::proxy::IngressConfig {
-        listen: listen.parse()?,
-        data_dir: data.clone(),
-        upstream: upstream.clone(),
-        health: Some(Arc::clone(&health)),
-        hold_window: Duration::from_millis(hold_ms),
-        durable_prefixes: blackbox_ingress::durable::parse_durable_prefixes(&webhooks),
-        queue: Some(blackbox_ingress::proxy::QueueAttachment {
-            runtime,
-            events: events_rx,
-        }),
-        ..Default::default()
-    };
-
-    // The egress interceptor records into the SAME segment store through the
-    // proxy's writer sink. The proxy handle exposes it only after spawn — so
-    // spawn the proxy first, then attach the interceptor with a closure over
-    // the sink.
-    let handle = blackbox_ingress::proxy::spawn_proxy(proxy_cfg).await?;
-    let interceptor = blackbox_queue::interceptor::spawn_interceptor(blackbox_queue::interceptor::InterceptorConfig {
-        listen: egress_listen.parse()?,
-        mode: Arc::new(blackbox_queue::interceptor::InterceptorMode::Record {
-            emit: {
-                let sink = handle.sink.clone();
-                Arc::new(move |mut rec: blackbox_core::schema::TraceRecord| {
-                    rec.seq_no = sink.next_seq();
-                    sink.try_send(rec);
-                })
-            },
-        }),
-    })
-    .await
-    .context("spawn egress interceptor")?;
-
-    println!(
-        "blackbox node listening on http://{} (upstream {})",
-        handle.local_addr, upstream
-    );
-    println!("  telemetry:  /api/{{project}}/envelope/  /v1/traces  /v1/logs");
-    println!("  durable:    webhook routes get 202 + x-blackbox-job-id (dispatcher armed)");
-    println!(
-        "  egress:     set HTTP_PROXY=http://{} on your app to record outgoing calls",
-        interceptor.local_addr
-    );
-    println!("  data:       {} (segments + jobs.redb)", data.display());
-    println!("  Ctrl-C to stop");
-    std::future::pending::<()>().await;
-    Ok(())
 }
 
 /// `blackbox replay <trace_id> --target <url>` — deterministic sandbox.
@@ -319,4 +235,70 @@ pub async fn queue_retry_dlq(data: PathBuf) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))??;
     println!("requeued {n} dead-lettered job(s) from the DLQ");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// env-child — the injectable-env stand-in app (used by `blackbox env-child`
+// in demos/sims; the app is unsupervised, the supervisor wants a real one)
+// ---------------------------------------------------------------------------
+
+/// INTERNAL subcommand body: dump the injected Blackbox env vars to a JSON
+/// file, then serve HTTP 200 "ok" on every path/port (GET, POST, anything).
+pub async fn env_child(port: u16, env_file: PathBuf) -> Result<()> {
+    const VARS: &[&str] = &[
+        "SENTRY_DSN",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OPENAI_BASE_URL",
+        "ANTHROPIC_BASE_URL",
+        "BLACKBOX_EGRESS_URL",
+    ];
+    let mut map = serde_json::Map::new();
+    for k in VARS {
+        if let Ok(v) = std::env::var(k) {
+            map.insert((*k).to_string(), serde_json::Value::String(v));
+        }
+    }
+    let json = serde_json::Value::Object(map).to_string();
+    std::fs::write(&env_file, json).with_context(|| format!("write {}", env_file.display()))?;
+
+    // SO_REUSEADDR is mandatory for a supervised app: after a SIGKILL the
+    // previous incarnation's accepted sockets sit in TIME_WAIT for up to a
+    // minute, and without reuseaddr the respawn EADDRINUSE-crash-loops.
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&std::net::SocketAddr::from(([127, 0, 0, 1], port)).into())
+        .with_context(|| format!("env-child bind 127.0.0.1:{port}"))?;
+    socket.listen(1024)?;
+    let listener = tokio::net::TcpListener::from_std(std::net::TcpListener::from(socket))?;
+    let addr = listener.local_addr()?;
+    eprintln!("env-child serving http://{addr} (env file {})", env_file.display());
+    loop {
+        let Ok((tcp, _)) = listener.accept().await else { continue };
+        let _ = tcp.set_nodelay(true);
+        tokio::spawn(async move {
+            let svc = hyper::service::service_fn(
+                move |req: hyper::Request<hyper::body::Incoming>| async move {
+                    let path = req.uri().path().to_string();
+                    // Drain the body (keep-alive hygiene), answer 200.
+                    let _ = http_body_util::BodyExt::collect(req.into_body()).await;
+                    let body = format!("ok {path}");
+                    Ok::<_, std::convert::Infallible>(
+                        hyper::Response::builder()
+                            .status(200)
+                            .header("content-type", "text/plain")
+                            .body(Full::new(Bytes::from(body)))
+                            .expect("env-child response builds"),
+                    )
+                },
+            );
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(tcp), svc)
+                .await;
+        });
+    }
 }

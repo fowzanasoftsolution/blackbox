@@ -19,6 +19,9 @@
 //! - [`validate`] — the soft-error schema guard: HTTP 200 + `{"error": ...}`
 //!   is NEVER cached (no cache poisoning from provider rate-limit bodies).
 //! - [`ledger`] — real-time FinOps cost & token ledger (in-memory + redb).
+//! - [`gates_phase4`] — Phase 4 gate harness: singleflight coalescing, cache
+//!   poisoning guard, RAM shedding, the SimHash near-cache gate (v1.1) and
+//!   the tamper-evident audit-chain gate.
 //! - Supervisor self-healing: 75 % RAM watermark purges the cache to 0
 //!   bytes via the watch hub; 85 % enables head-based ingress sampling.
 //!
@@ -28,13 +31,12 @@
 
 pub mod cache;
 pub mod flight;
+pub mod gates_phase4;
 pub mod gateway;
 pub mod key;
 pub mod ledger;
 pub mod simhash;
 pub mod validate;
-pub mod verify4;
-pub mod verify5;
 
 pub use cache::{CachedEntry, ResponseCache};
 pub use flight::{FlightTable, UpstreamOutcome};
@@ -42,8 +44,8 @@ pub use gateway::{
     spawn_egress, EgressConfig, EgressHandle, EmitFn, ResBody, MAX_BYPASS_CAPTURE,
     MAX_EGRESS_REQ_BODY, MAX_EGRESS_RES_BODY,
 };
+pub use gates_phase4::{gate1, gate2, gate3};
 pub use ledger::{CostLedger, LedgerEntry, LedgerKey, RequestKind, Usage};
-pub use verify4::{gate1, gate2, gate3};
 
 /// Crate identity tag.
 pub const ENGINE: &str = "egress-finops";

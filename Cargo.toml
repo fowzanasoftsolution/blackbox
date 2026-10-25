@@ -8,7 +8,7 @@ members = [
     "crates/blackbox-queue",
     "crates/blackbox-telemetry",
     "crates/blackbox-egress",
-    "bins/blackbox",
+    "crates/blackbox",
 ]
 
 [workspace.package]

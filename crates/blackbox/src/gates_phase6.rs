@@ -14,45 +14,12 @@
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use crate::util::hex_of;
 use http_body_util::Full;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-pub fn hex_of(bytes: &[u8]) -> String {
-    phase6_hex::enc(bytes)
-}
-
-pub fn hex_bytes(s: &str) -> Option<Vec<u8>> {
-    phase6_hex::dec(s)
-}
-
-mod phase6_hex {
-    pub fn enc(bytes: &[u8]) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut out = String::with_capacity(bytes.len() * 2);
-        for b in bytes {
-            out.push(HEX[(b >> 4) as usize] as char);
-            out.push(HEX[(b & 0x0F) as usize] as char);
-        }
-        out
-    }
-
-    pub fn dec(s: &str) -> Option<Vec<u8>> {
-        let b = s.as_bytes();
-        if b.len() % 2 != 0 {
-            return None;
-        }
-        let mut out = Vec::with_capacity(b.len() / 2);
-        for pair in b.chunks(2) {
-            let hi = (pair[0] as char).to_digit(16)?;
-            let lo = (pair[1] as char).to_digit(16)?;
-            out.push(((hi << 4) | lo) as u8);
-        }
-        Some(out)
-    }
-}
 
 fn tmpdir(tag: &str) -> PathBuf {
     // Sweep leftovers from PREVIOUS gate runs (panics never clean up, and
@@ -534,7 +501,7 @@ pub async fn gate3() -> Result<()> {
         "upstream app must come up"
     );
 
-    let node = crate::phase4::spawn_node(crate::phase4::NodeConfig {
+    let node = crate::node::spawn_node(crate::node::NodeConfig {
         listen: "127.0.0.1:0".into(),
         upstream: format!("127.0.0.1:{upstream_port}"),
         data: data.clone(),
@@ -549,7 +516,7 @@ pub async fn gate3() -> Result<()> {
         shield: true,
         rate_rps: 0.0,
         rate_burst: 100,
-        tls: crate::phase4::TlsOptions::Off,
+        tls: crate::node::TlsOptions::Off,
     })
     .await?;
 

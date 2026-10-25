@@ -19,7 +19,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::phase4::{spawn_node, NodeConfig, TlsOptions};
+use crate::node::{spawn_node, NodeConfig, TlsOptions};
 
 /// Tiny upstream: 200 "ok" to everything (gates 1 and 2).
 async fn spawn_echo(addr: &str) -> Result<std::net::SocketAddr> {

@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::phase4::{spawn_node, NodeConfig, TlsOptions};
+use crate::node::{spawn_node, NodeConfig, TlsOptions};
 
 /// ANSI palette (respects NO_COLOR).
 fn c(code: &str) -> String {

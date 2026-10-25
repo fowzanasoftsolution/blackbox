@@ -1,23 +1,14 @@
-//! Phase 5: storage lifecycle janitor (disk ring-quota wiring) + the
-//! zero-config `blackbox run` primitives (env child + supervision) and the
-//! three Phase 5 verification gates.
+//! Phase 5 verification gates:
 //!
-//! - [`spawn_storage_janitor`] — wakes on every segment rotation or a 2 s
-//!   tick, publishes the DiskMonitor watermarks, and reacts:
-//!     * `Compress75+` → `compact_all` (zstd-3 + `.idx` sidecars),
-//!     * `Evict85+`   → FIFO eviction of the oldest cold `.zst` segments
-//!       down to 80 % of quota,
-//!     * `Emergency95` → survival shedding is continuous: the Finalizer
-//!       reads `CURRENT_DISK_LEVEL` and drops healthy fast 2xx telemetry
-//!       while SentryCrash / 4xx / 5xx / queue jobs are preserved.
-//! - [`env_child`] — the injectable-env HTTP stand-in app used by
-//!   `blackbox run` demos and Gates 2/3.
 //! - [`gate1`] hot-to-cold rollover + cold replay + eviction,
 //! - [`gate2`] zero-config auto-resurrection,
 //! - [`gate3`] zero-leak mixed-workload soak (100 K+ ops, flat RSS).
+//!
+//! The storage-management code these gates exercise lives in
+//! [`crate::janitor`]; the injectable-env stand-in app is [`crate::ops`].
 
 use anyhow::{Context, Result};
-use blackbox_core::compactor::{CompactorStats, DEFAULT_COMPRESS_LEVEL};
+use blackbox_core::compactor::DEFAULT_COMPRESS_LEVEL;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
@@ -31,128 +22,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type HttpBody = Full<Bytes>;
 type ClientT = Client<HttpConnector, HttpBody>;
-
-// ---------------------------------------------------------------------------
-// Storage janitor
-// ---------------------------------------------------------------------------
-
-/// Spawn the Phase 5 storage janitor. Reacts to segment rotations (watch)
-/// and a 2 s tick: publishes disk watermarks, compresses warm segments at
-/// 75 %, FIFO-evicts the oldest cold `.zst` at 85 % (down to 80 % of
-/// quota). Emergency95 shedding happens inline in the ingress Finalizer.
-pub fn spawn_storage_janitor(
-    dir: PathBuf,
-    mut active: tokio::sync::watch::Receiver<u32>,
-    disk: Arc<blackbox_supervisor::disk::DiskMonitor>,
-    stats: Arc<CompactorStats>,
-    cold: Option<Arc<blackbox_cold::ColdTier>>,
-) -> tokio::task::JoinHandle<()> {
-    use blackbox_supervisor::disk::DiskLevel;
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(2));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut last_logged = DiskLevel::Normal;
-        loop {
-            tokio::select! {
-                _ = tick.tick() => {}
-                _ = active.changed() => {}
-            }
-            let Ok(reading) = disk.poll() else { continue };
-            if reading.level != last_logged {
-                tracing::warn!(
-                    level = ?reading.level,
-                    used = reading.used_bytes,
-                    quota = disk.quota_bytes,
-                    "disk watermark transition"
-                );
-                last_logged = reading.level;
-            }
-            let active_id = *active.borrow();
-
-            // Background compaction runs on EVERY wake (rotation or 2 s
-            // tick): sealed segments are immutable, so compressing them is
-            // always safe and a pass over an already-clean dir is one
-            // read_dir. The disk watermarks only escalate urgency (75%
-            // forces an immediate full pass; here the normal cadence keeps
-            // the backlog near zero).
-            {
-                let d = dir.clone();
-                let r = tokio::task::spawn_blocking(move || {
-                    blackbox_core::compactor::compact_all(&d, active_id, DEFAULT_COMPRESS_LEVEL)
-                })
-                .await;
-                if let Ok(Ok(rep)) = r {
-                    if rep.segments_compacted > 0 || rep.stale_zst_removed > 0 {
-                        stats.compactions.fetch_add(rep.segments_compacted as u64, Ordering::Relaxed);
-                        stats.bytes_saved.fetch_add(rep.bytes_saved, Ordering::Relaxed);
-                        stats.frames_indexed.fetch_add(rep.frames_indexed, Ordering::Relaxed);
-                        tracing::info!(
-                            segments = rep.segments_compacted,
-                            saved = rep.bytes_saved,
-                            level = ?reading.level,
-                            "compacted sealed segments"
-                        );
-                    }
-                }
-            }
-
-            // Phase 6: sealed segments flow to the S3/R2 cold tier right
-            // after compaction (sync-before-evict is enforced by the tier
-            // classifier itself: unsynced segments are pinned).
-            if let Some(cold) = &cold {
-                let c = Arc::clone(cold);
-                let d = dir.clone();
-                if let Ok(Ok(rep)) =
-                    tokio::task::spawn_blocking(move || c.sync_sealed(&d, active_id)).await
-                {
-                    if rep.uploaded > 0 || rep.failures > 0 {
-                        tracing::info!(
-                            uploaded = rep.uploaded,
-                            failed = rep.failures,
-                            "cold-tier sync pass"
-                        );
-                    }
-                }
-            }
-
-            // 85%: evict cold .zst segments down to 80% of quota. With the
-            // cold tier attached this is TIERED (healthy 2xx-only first,
-            // 4xx next, crash/5xx pinned longest; unsynced never evicted);
-            // without it, plain FIFO as in Phase 5.
-            if reading.level >= DiskLevel::Evict85 {
-                let target = reading
-                    .used_bytes
-                    .saturating_sub(disk.quota_bytes / 5 * 4);
-                if target > 0 {
-                    let d = dir.clone();
-                    let result = match &cold {
-                        Some(c) => {
-                            let c = Arc::clone(c);
-                            tokio::task::spawn_blocking(move || {
-                                let tier_of = move |id: u32| c.evict_tier(id);
-                                blackbox_core::compactor::evict_cold_tiered(&d, target, &tier_of)
-                            })
-                            .await
-                        }
-                        None => tokio::task::spawn_blocking(move || {
-                            blackbox_core::compactor::evict_cold_fifo(&d, target)
-                        })
-                        .await,
-                    };
-                    if let Ok(Ok((n, freed))) = result {
-                        if n > 0 {
-                            stats.evictions.fetch_add(n as u64, Ordering::Relaxed);
-                            tracing::warn!(removed = n, freed, "disk 85%: evicted cold .zst segments");
-                        }
-                    }
-                }
-            }
-            // Emergency95: no extra janitor action — CURRENT_DISK_LEVEL is
-            // published by poll() and the ingress Finalizer sheds healthy
-            // 200-OK telemetry (SentryCrash/5xx/queue preserved).
-        }
-    })
-}
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -234,71 +103,6 @@ async fn wait_port(addr: SocketAddr, timeout: Duration) -> bool {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     false
-}
-
-// ---------------------------------------------------------------------------
-// env-child — the injectable-env stand-in app (used by `blackbox run`)
-// ---------------------------------------------------------------------------
-
-/// INTERNAL subcommand body: dump the injected Blackbox env vars to a JSON
-/// file, then serve HTTP 200 "ok" on every path/port (GET, POST, anything).
-pub async fn env_child(port: u16, env_file: PathBuf) -> Result<()> {
-    const VARS: &[&str] = &[
-        "SENTRY_DSN",
-        "OTEL_EXPORTER_OTLP_ENDPOINT",
-        "OPENAI_BASE_URL",
-        "ANTHROPIC_BASE_URL",
-        "BLACKBOX_EGRESS_URL",
-    ];
-    let mut map = serde_json::Map::new();
-    for k in VARS {
-        if let Ok(v) = std::env::var(k) {
-            map.insert((*k).to_string(), serde_json::Value::String(v));
-        }
-    }
-    let json = serde_json::Value::Object(map).to_string();
-    std::fs::write(&env_file, json).with_context(|| format!("write {}", env_file.display()))?;
-
-    // SO_REUSEADDR is mandatory for a supervised app: after a SIGKILL the
-    // previous incarnation's accepted sockets sit in TIME_WAIT for up to a
-    // minute, and without reuseaddr the respawn EADDRINUSE-crash-loops.
-    let socket = socket2::Socket::new(
-        socket2::Domain::IPV4,
-        socket2::Type::STREAM,
-        Some(socket2::Protocol::TCP),
-    )?;
-    socket.set_reuse_address(true)?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&std::net::SocketAddr::from(([127, 0, 0, 1], port)).into())
-        .with_context(|| format!("env-child bind 127.0.0.1:{port}"))?;
-    socket.listen(1024)?;
-    let listener = tokio::net::TcpListener::from_std(std::net::TcpListener::from(socket))?;
-    let addr = listener.local_addr()?;
-    eprintln!("env-child serving http://{addr} (env file {})", env_file.display());
-    loop {
-        let Ok((tcp, _)) = listener.accept().await else { continue };
-        let _ = tcp.set_nodelay(true);
-        tokio::spawn(async move {
-            let svc = hyper::service::service_fn(
-                move |req: hyper::Request<hyper::body::Incoming>| async move {
-                    let path = req.uri().path().to_string();
-                    // Drain the body (keep-alive hygiene), answer 200.
-                    let _ = http_body_util::BodyExt::collect(req.into_body()).await;
-                    let body = format!("ok {path}");
-                    Ok::<_, std::convert::Infallible>(
-                        hyper::Response::builder()
-                            .status(200)
-                            .header("content-type", "text/plain")
-                            .body(Full::new(Bytes::from(body)))
-                            .expect("env-child response builds"),
-                    )
-                },
-            );
-            let _ = hyper::server::conn::http1::Builder::new()
-                .serve_connection(TokioIo::new(tcp), svc)
-                .await;
-        });
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -790,7 +594,7 @@ pub async fn gate3() -> Result<()> {
     let env_file = dir.join("child-env.json");
 
     // ---- Full node in-process: 1 MB segments → real rollover churn. -----
-    let node = crate::phase4::spawn_node(crate::phase4::NodeConfig {
+    let node = crate::node::spawn_node(crate::node::NodeConfig {
         listen: "127.0.0.1:0".into(),
         upstream: format!("127.0.0.1:{child_port}"),
         data: dir.clone(),
@@ -805,7 +609,7 @@ pub async fn gate3() -> Result<()> {
         shield: true,
         rate_rps: 0.0,
         rate_burst: 100,
-        tls: crate::phase4::TlsOptions::Off,
+        tls: crate::node::TlsOptions::Off,
     })
     .await?;
 

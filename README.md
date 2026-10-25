@@ -1,3 +1,12 @@
+<div align="center">
+
+[![CI](https://github.com/Nsiowj1/blackbox/actions/workflows/ci.yml/badge.svg)](https://github.com/Nsiowj1/blackbox/actions/workflows/ci.yml)
+[![Release](https://github.com/Nsiowj1/blackbox/actions/workflows/release.yml/badge.svg)](https://github.com/Nsiowj1/blackbox/actions/workflows/release.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
+
+</div>
+
 # Project Blackbox — the Rust Omni-Sidecar
 
 **One <16 MB static binary that replaces four layers of infrastructure** — Sentry,
@@ -27,7 +36,49 @@ workspace tests green in release, **21/21 verification gates passing**, binary
 Pro differentiators as pure Rust: a SimHash near-duplicate prompt cache and a
 tamper-evident audit chain.
 
----
+## Contents
+
+- [Install](#install)
+- [Experience everything in 60 seconds](#experience-everything-in-60-seconds)
+- [Deploy to a bare VPS](#deploy-to-a-bare-vps)
+- [The four engines](#the-four-engines)
+- [The Pro differentiators (v1.1)](#the-pro-differentiators-v11)
+- [Admin dashboard](#admin-dashboard)
+- [CLI reference](#cli-reference)
+- [Environment](#environment)
+- [Storage watermarks & data layout](#storage-watermarks--data-layout)
+- [Cold tier setup (S3 / R2 / MinIO)](#cold-tier-setup-s3--r2--minio)
+- [Self-update (air-gap friendly)](#self-update-air-gap-friendly)
+- [SDK compatibility matrix](#sdk-compatibility-matrix)
+- [Deployment snippets](#deployment-snippets)
+- [Verification](#verification-all-measured-on-a-2-vcpu-shared-runner)
+- [Repository layout](#repository-layout)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
+
+## Install
+
+**One line (Linux x86_64 / aarch64)** — downloads the latest signed GitHub
+release, verifies the SHA-256 checksum, installs to `/usr/local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Nsiowj1/blackbox/main/scripts/install.sh | sh
+```
+
+**From source** — Rust stable, no C toolchain needed:
+
+```bash
+git clone https://github.com/Nsiowj1/blackbox && cd blackbox
+cargo build --release --workspace
+sudo cp target/release/blackbox /usr/local/bin/   # or ~/.local/bin
+```
+
+**Docker** (static binary, no runtime deps) — see
+[Deployment snippets](#deployment-snippets).
+
+Verify the installation: `blackbox demo --once` runs the full four-engine
+smoke test headlessly and must exit 0.
 
 ## Experience everything in 60 seconds
 
@@ -369,6 +420,11 @@ CMD ["blackbox", "run", "--listen", "0.0.0.0:8080", "--data", "/data", "--", "/s
 
 ## Verification (all measured on a 2-vCPU shared runner)
 
+Gate sources live in `crates/*/src/gates_phase<n>.rs` and
+`crates/*/tests/phase<n>_gates.rs` — every gate is also a CI test. Run any
+gate directly: `blackbox p1..p7-gate <n>`, or the whole battery:
+`cargo test --workspace --release` (201 tests) + `blackbox demo --once`.
+
 | Phase | Gate | Measured result |
 |---|---|---|
 | 1 | torn write / bit-flip / kill -9 recovery | deterministic harness: **PASS** (crash-pinned fsync discipline) |
@@ -383,21 +439,35 @@ CMD ["blackbox", "run", "--listen", "0.0.0.0:8080", "--data", "/data", "--", "/s
 idle RSS ≈ 18 MB · load RSS 33.1 MB (< 35 MB) · 201 workspace tests green in
 release.
 
-## Building from source
+## Repository layout
 
-```bash
-cargo build --release --bin blackbox     # Rust stable, no C toolchain needed
-ls -la target/release/blackbox
-cargo test --release --workspace         # 201 tests
-./target/release/blackbox demo --once    # 21-gate smoke in one command
-```
+A Cargo workspace of eight crates (uniform `crates/*`, one binary crate):
 
-The workspace is eight crates: `blackbox-core` (frames/schema/compactor/
-breaker), `blackbox-ingress` (proxy/tee/scrub/guard/tls/index), `blackbox-
-queue` (leases/dispatch/replay), `blackbox-telemetry` (Sentry/OTLP), `black
-box-egress` (gateway/singleflight/cache/ledger), `blackbox-cold`
-(SigV4/tier/mock), `blackbox-supervisor` (RAM/disk monitors) and the `black
-box` CLI.
+| Crate | Contents |
+|---|---|
+| `crates/blackbox` | the CLI binary: node assembly (`node`), command plumbing (`ops`, `run`, `selfupdate`), dashboard, demo, benchmarks, and every verification gate |
+| `crates/blackbox-core` | storage engine: frames, schema, segment store, compactor, breaker, queue actor, the audit chain |
+| `crates/blackbox-ingress` | reverse proxy, tee capture, scrubber, WAF, rate limiter, TLS, trace index, gate harnesses |
+| `crates/blackbox-queue` | durable jobs: leases, dispatcher, reaper, interceptor |
+| `crates/blackbox-telemetry` | Sentry envelope + OTLP ingestion/wire formats |
+| `crates/blackbox-egress` | gateway, singleflight, cache, finops ledger, SimHash near cache, gate harnesses |
+| `crates/blackbox-cold` | hand-rolled SigV4, S3/R2 tier policy, mock bucket |
+| `crates/blackbox-supervisor` | RAM/disk watermark monitors, process supervision |
+
+Naming convention: `gates_phase<n>` modules hold the verification harnesses
+for product phase *n*; everything else is named by role (`node`, `ops`,
+`janitor`, `util`) — no historical sprint names survive.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) — build protocol, gate inventory and
+the commit convention. PRs that regress any gate fail CI by construction.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) — how to report vulnerabilities (GitHub
+private vulnerability reporting), supported versions, and the release-signing
+discipline. Do not open public issues for security reports.
 
 ## License
 

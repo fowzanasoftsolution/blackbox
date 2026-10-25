@@ -291,7 +291,7 @@ pub struct RunArgs {
     pub shield: bool,
     pub rate_rps: f64,
     pub rate_burst: u32,
-    pub tls: crate::phase4::TlsOptions,
+    pub tls: crate::node::TlsOptions,
 }
 
 pub async fn run_node(args: RunArgs) -> Result<()> {
@@ -300,7 +300,7 @@ pub async fn run_node(args: RunArgs) -> Result<()> {
         "`blackbox run` needs a command after `--` (e.g. `blackbox run --upstream-port 3000 -- python3 app.py`)"
     );
 
-    let node = crate::phase4::spawn_node(crate::phase4::NodeConfig {
+    let node = crate::node::spawn_node(crate::node::NodeConfig {
         listen: args.listen.clone(),
         upstream: format!("127.0.0.1:{}", args.upstream_port),
         data: args.data.clone(),

@@ -26,12 +26,14 @@
 //! - [`tls`] — Phase 7 native TLS termination (tokio-rustls) with zero-
 //!   downtime certificate hot reload.
 //! - [`traceparent`] — W3C Trace Context parsing/generation.
-//! - [`verify`] — Phase 2 gate harness: end-to-end causal-link test, stream
+//! - [`gates_phase2`] — Phase 2 gate harness: end-to-end causal-link test, stream
 //!   & bomb-safety test, and the 2-vCPU throughput/latency benchmark.
-//! - [`verify3`] — Phase 3 gate harness: zero-lost-webhooks chaos test,
+//! - [`gates_phase3`] — Phase 3 gate harness: zero-lost-webhooks chaos test,
 //!   invisible-restart connection hold, deterministic replay sandbox.
 
 pub mod durable;
+pub mod gates_phase2;
+pub mod gates_phase3;
 pub mod index;
 pub mod proxy;
 pub mod rate_limit;
@@ -39,11 +41,11 @@ pub mod scrub;
 pub mod tee;
 pub mod tls;
 pub mod traceparent;
-pub mod verify;
-pub mod verify3;
-pub mod verify_sdk;
 pub mod waf;
 pub mod writer;
+
+#[cfg(test)]
+pub mod verify_sdk;
 
 /// Crate identity tag.
 pub const ENGINE: &str = "ingress-shield";
