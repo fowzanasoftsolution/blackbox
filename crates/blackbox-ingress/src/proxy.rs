@@ -20,7 +20,7 @@ use crate::rate_limit::{Decision, RateLimiter};
 use crate::scrub::Scrubber;
 use crate::tee::{capture_policy, CaptureBuf, Finalizer, TeeBody, CAPTURE_MAX_BYTES, CapturePolicy};
 use crate::tls::TlsState;
-use crate::traceparent::{Traceparent, TRACEPARENT_HEADER, TRACE_ID_RESPONSE_HEADER};
+use crate::traceparent::{Traceparent, SENTRY_TRACE_HEADER, TRACEPARENT_HEADER, TRACE_ID_RESPONSE_HEADER};
 use crate::waf::ScannerShield;
 use crate::writer::{RecordSink, WriterConfig};
 use blackbox_core::breaker::UpstreamHealth;
@@ -737,6 +737,23 @@ async fn handle_proxy(req: hyper::Request<Incoming>, ctx: Arc<ProxyCtx>) -> hype
             }
         }
     }
+    // Real-SDK correlation: sentry-sdk continues traces ONLY from the
+    // `sentry-trace` header (it ignores W3C traceparent), so also inject
+    // the same trace id in Sentry's wire format. Without this a REAL SDK
+    // attached to the injected SENTRY_DSN starts a random trace and its
+    // crash envelope no longer lands next to the request that caused it.
+    // Never overrides a caller-supplied sentry-trace.
+    if upstream_req.headers().get(SENTRY_TRACE_HEADER).is_none() {
+        match HeaderValue::from_str(&tp.to_sentry_trace()) {
+            Ok(hv) => {
+                upstream_req.headers_mut().insert(SENTRY_TRACE_HEADER, hv);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "sentry-trace value build failed");
+                return internal_error();
+            }
+        }
+    }
     // Header snapshot for the record (as sent upstream).
     let req_headers_snapshot: Vec<(String, String)> = upstream_req
         .headers()
@@ -1011,14 +1028,34 @@ fn upgrade_passthrough(
 
 /// Origin-form URI → upstream absolute URI.
 fn build_upstream_uri(orig: &Uri, upstream: &str) -> Result<Uri, BoxError> {
+    // Accept BOTH bare `host:port` and full URLs (`http://host:port/base`,
+    // the form `blackbox replay`'s own help + admin replay_command print).
+    // A URL is split into authority + optional base path; the base path is
+    // prepended to every forwarded request.
+    let (authority, base_path) = match upstream.split_once("://") {
+        Some((_scheme, rest)) => match rest.find('/') {
+            Some(i) => (rest[..i].to_string(), rest[i..].trim_end_matches('/').to_string()),
+            None => (rest.to_string(), String::new()),
+        },
+        None => (upstream.to_string(), String::new()),
+    };
+    if authority.is_empty() || authority.contains('/') {
+        return Err(BoxError::from(format!(
+            "upstream uri: invalid upstream `{upstream}` (need host:port or a URL)"
+        )));
+    }
     let pq = orig
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
     Uri::builder()
         .scheme("http")
-        .authority(upstream)
-        .path_and_query(pq)
+        .authority(authority.as_str())
+        .path_and_query(if base_path.is_empty() {
+            pq
+        } else {
+            format!("{base_path}{pq}")
+        })
         .build()
         .map_err(|e| BoxError::from(format!("upstream uri: {e}")))
 }
@@ -1273,4 +1310,41 @@ async fn handle_otlp(
         ],
         Bytes::from_static(b"{\"partialSuccess\":{}}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uri(s: &'static str) -> Uri {
+        Uri::from_static(s)
+    }
+
+    /// Regression (real-sdk matrix): `blackbox replay --target <URL>` —
+    /// the URL form its own help text and the admin `replay_command` print —
+    /// must not produce `http://http://…` ("invalid uri character").
+    #[test]
+    fn upstream_uri_accepts_bare_and_url_forms() {
+        // Bare host:port (classic form).
+        assert_eq!(
+            build_upstream_uri(&uri("/llm?x=1"), "127.0.0.1:3000").unwrap().to_string(),
+            "http://127.0.0.1:3000/llm?x=1"
+        );
+        // Full URL, no path (the replay CLI's documented form).
+        assert_eq!(
+            build_upstream_uri(&uri("/llm"), "http://127.0.0.1:18081").unwrap().to_string(),
+            "http://127.0.0.1:18081/llm"
+        );
+        // Full URL with a base path — every request is prefixed.
+        assert_eq!(
+            build_upstream_uri(&uri("/llm?a=1"), "http://127.0.0.1:80/api").unwrap().to_string(),
+            "http://127.0.0.1:80/api/llm?a=1"
+        );
+        assert_eq!(
+            build_upstream_uri(&uri("/"), "https://app.internal/svc/").unwrap().to_string(),
+            "http://app.internal/svc/"
+        );
+        // Garbage must fail cleanly, not build a nonsense URI.
+        assert!(build_upstream_uri(&uri("/x"), "http://").is_err());
+    }
 }

@@ -249,8 +249,9 @@ enum Cmd {
         /// Detached signature file (128 hex chars, Ed25519 over SHA-256).
         #[arg(long)]
         sig: PathBuf,
-        /// Verifying key (64 hex). Falls back to BLACKBOX_UPDATE_PUBKEY
-        /// env or <data>/update.pub.
+        /// Verifying key (64 hex). Falls back to BLACKBOX_VERIFY_PUBKEY,
+        /// legacy BLACKBOX_UPDATE_PUBKEY, <data>/update.pub, then the
+        /// compiled-in official release key.
         #[arg(long)]
         pubkey: Option<String>,
         #[arg(long, default_value = "./data")]

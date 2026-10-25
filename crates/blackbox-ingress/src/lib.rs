@@ -41,6 +41,7 @@ pub mod tls;
 pub mod traceparent;
 pub mod verify;
 pub mod verify3;
+pub mod verify_sdk;
 pub mod waf;
 pub mod writer;
 

@@ -28,8 +28,11 @@
 //!    kept; the live server was NEVER touched.
 //!
 //! The public key comes from (in order): `--pubkey <hex>`, the
-//! `BLACKBOX_UPDATE_PUBKEY` env var, or `<data>/update.pub`. Production
-//! builds should bake the release key into the binary.
+//! `BLACKBOX_VERIFY_PUBKEY` env var, the legacy `BLACKBOX_UPDATE_PUBKEY`
+//! env var, `<data>/update.pub`, or the COMPILED-IN official release key
+//! ([`RELEASE_VERIFY_KEY`]). Official v1.0+ builds verify against the
+//! release key with zero configuration; enterprises bake their own key at
+//! build time via `BLACKBOX_RELEASE_PUBKEY` or override at runtime.
 
 use anyhow::{anyhow, bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -39,6 +42,21 @@ use std::time::{Duration, Instant};
 
 /// Canary health-probe window (ms) before a hung candidate is killed.
 pub const DEFAULT_CANARY_WINDOW_MS: u64 = 10_000;
+
+/// The OFFICIAL release verifying key, compiled in. Every official binary
+/// verifies `blackbox self-update` candidates against this key with zero
+/// configuration. Escapes:
+///   * build time — build with `BLACKBOX_RELEASE_PUBKEY=<64 hex>` to bake
+///     a different (e.g. enterprise) key into the binary;
+///   * run time — `--pubkey`, `BLACKBOX_VERIFY_PUBKEY`, the legacy
+///     `BLACKBOX_UPDATE_PUBKEY`, or `<data>/update.pub` all win over it.
+/// The matching 64-hex PRIVATE seed lives ONLY in the release CI secret
+/// `BLACKBOX_SIGNING_KEY` (and the operator's offline key ceremony) — it
+/// is never committed, never shipped, never logged.
+pub const RELEASE_VERIFY_KEY: &str = match option_env!("BLACKBOX_RELEASE_PUBKEY") {
+    Some(k) => k,
+    None => "77b44dc4dd7f50fef3dc959963050fb490e78a15a438aed18418ce2109a1f153",
+};
 
 // ---------------------------------------------------------------------------
 // Keys & signatures
@@ -94,23 +112,20 @@ pub fn load_signing_key(spec: &str) -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&arr))
 }
 
-/// Resolve the verifying key: `--pubkey <hex>` > `BLACKBOX_UPDATE_PUBKEY`
-/// env > `<data>/update.pub` file.
+/// Resolve the verifying key: `--pubkey <hex>` > `BLACKBOX_VERIFY_PUBKEY`
+/// > legacy `BLACKBOX_UPDATE_PUBKEY` > `<data>/update.pub` > the
+/// compiled-in [`RELEASE_VERIFY_KEY`].
 pub fn resolve_verifying_key(explicit: Option<&str>, data_dir: &Path) -> Result<VerifyingKey> {
     let hex_opt = explicit
         .map(|s| s.to_string())
+        .or_else(|| std::env::var("BLACKBOX_VERIFY_PUBKEY").ok())
         .or_else(|| std::env::var("BLACKBOX_UPDATE_PUBKEY").ok())
         .or_else(|| {
             let p = data_dir.join("update.pub");
             std::fs::read_to_string(&p).ok().map(|s| (p, s)).map(|(_, s)| s)
-        });
-    let Some(hex) = hex_opt else {
-        bail!(
-            "no update public key configured — pass --pubkey <hex>, set \
-             BLACKBOX_UPDATE_PUBKEY, or write <data>/update.pub"
-        );
-    };
-    let bytes = crate::phase6::hex_bytes(hex.trim())
+        })
+        .unwrap_or_else(|| RELEASE_VERIFY_KEY.to_string());
+    let bytes = crate::phase6::hex_bytes(hex_opt.trim())
         .ok_or_else(|| anyhow!("public key must be 64 hex chars"))?;
     let arr: [u8; 32] = bytes
         .try_into()
@@ -515,5 +530,125 @@ pub async fn self_test(canary_port: u16, data: PathBuf) -> Result<()> {
                 .serve_connection(hyper_util::rt::TokioIo::new(tcp), svc)
                 .await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::phase6::hex_of;
+    use std::sync::Mutex;
+
+    /// Env vars are process-global and tests run in parallel threads —
+    /// every test that reads/muts the override env chain holds this lock.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Deterministic TEST keypair — never the release key.
+    fn test_sk() -> SigningKey {
+        SigningKey::from_bytes(&[0x5A; 32])
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("bb-vk-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn compiled_release_key_is_valid_and_is_the_zero_config_default() {
+        let _env = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("BLACKBOX_VERIFY_PUBKEY");
+        std::env::remove_var("BLACKBOX_UPDATE_PUBKEY");
+        // The compiled-in key must parse through the same resolution path
+        // operators hit, and must BE what resolve returns with nothing set.
+        let dir = scratch_dir("default");
+        let vk = resolve_verifying_key(None, &dir).expect("compiled-in key must load");
+        let via_explicit = resolve_verifying_key(Some(RELEASE_VERIFY_KEY), &dir)
+            .expect("compiled-in key parses as an explicit key too");
+        assert_eq!(vk.to_bytes(), via_explicit.to_bytes());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Full precedence chain in ONE test (env vars are process-global, so
+    /// the mutating assertions must not run concurrently).
+    #[test]
+    fn verify_key_precedence_chain() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let test_vk_hex = hex_of(&test_sk().verifying_key().to_bytes());
+        let other_hex = hex_of(&SigningKey::from_bytes(&[0xA5; 32]).verifying_key().to_bytes());
+        let dir = scratch_dir("chain");
+
+        std::env::remove_var("BLACKBOX_VERIFY_PUBKEY");
+        std::env::remove_var("BLACKBOX_UPDATE_PUBKEY");
+
+        // 1) nothing set → compiled-in official release key.
+        assert_eq!(
+            hex_of(&resolve_verifying_key(None, &dir).unwrap().to_bytes()),
+            RELEASE_VERIFY_KEY,
+            "zero-config must resolve to the official release key"
+        );
+
+        // 2) <data>/update.pub file wins over the compiled-in default.
+        std::fs::write(dir.join("update.pub"), &test_vk_hex).unwrap();
+        assert_eq!(
+            hex_of(&resolve_verifying_key(None, &dir).unwrap().to_bytes()),
+            test_vk_hex,
+            "update.pub must beat the compiled-in default"
+        );
+
+        // 3) legacy BLACKBOX_UPDATE_PUBKEY env wins over the file.
+        std::env::set_var("BLACKBOX_UPDATE_PUBKEY", &other_hex);
+        assert_eq!(
+            hex_of(&resolve_verifying_key(None, &dir).unwrap().to_bytes()),
+            other_hex,
+            "legacy env must beat update.pub"
+        );
+
+        // 4) BLACKBOX_VERIFY_PUBKEY (enterprise override) wins over legacy.
+        std::env::set_var("BLACKBOX_VERIFY_PUBKEY", &test_vk_hex);
+        assert_eq!(
+            hex_of(&resolve_verifying_key(None, &dir).unwrap().to_bytes()),
+            test_vk_hex,
+            "BLACKBOX_VERIFY_PUBKEY must beat the legacy env"
+        );
+
+        // 5) explicit --pubkey wins over everything.
+        assert_eq!(
+            hex_of(&resolve_verifying_key(Some(&other_hex), &dir).unwrap().to_bytes()),
+            other_hex,
+            "explicit --pubkey must win over all env/file/default sources"
+        );
+
+        std::env::remove_var("BLACKBOX_VERIFY_PUBKEY");
+        std::env::remove_var("BLACKBOX_UPDATE_PUBKEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sign → resolve (env override) → verify, plus tamper rejection: the
+    /// exact loop release CI + user machines exercise.
+    #[test]
+    fn sign_verify_roundtrip_via_runtime_override() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let sk = test_sk();
+        let vk_hex = hex_of(&sk.verifying_key().to_bytes());
+        std::env::set_var("BLACKBOX_VERIFY_PUBKEY", &vk_hex);
+
+        let dir = scratch_dir("roundtrip");
+        let vk = resolve_verifying_key(None, &dir).expect("env override must resolve");
+        let candidate = b"#!/bin/sh\nfake candidate binary bytes\n";
+        let sig = sign_bytes(&sk, candidate);
+        verify_signature(&vk, candidate, &sig).expect("valid signature must verify");
+
+        let mut chars: Vec<char> = sig.chars().collect();
+        chars[5] = if chars[5] == '0' { '1' } else { '0' };
+        let tampered: String = chars.into_iter().collect();
+        assert!(
+            verify_signature(&vk, candidate, &tampered).is_err(),
+            "tampered signature must be rejected"
+        );
+
+        std::env::remove_var("BLACKBOX_VERIFY_PUBKEY");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

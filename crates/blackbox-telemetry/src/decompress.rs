@@ -2,9 +2,9 @@
 //! ceiling (blueprint §2 landmine #4 class: never let a hostile payload
 //! dictate memory use).
 //!
-//! `gzip` and `zstd` are decoded with a hard output cap — the classic
-//! "zip bomb" (a few KB of compressed data expanding to gigabytes) is
-//! rejected the moment output exceeds [`MAX_DECOMPRESSED`], before any
+//! `gzip`, `zstd` and `brotli` are decoded with a hard output cap — the
+//! classic "zip bomb" (a few KB of compressed data expanding to gigabytes)
+//! is rejected the moment output exceeds [`MAX_DECOMPRESSED`], before any
 //! allocation past the cap happens.
 
 use blackbox_core::error::StorageError;
@@ -67,6 +67,9 @@ impl Capped {
 /// - `identity` / `""` → passthrough (still capped).
 /// - `gzip` / `x-gzip` → flate2 (pure-Rust miniz backend).
 /// - `zstd` → zstd crate.
+/// - `br` / `brotli` → brotli crate — the official sentry-sdk (2.7x+)
+///   ships envelopes with `Content-Encoding: br` (real-SDK matrix,
+///   Daytona clean-room run), so it must decode like gzip/zstd.
 ///
 /// Any path that would produce more than [`MAX_DECOMPRESSED`] bytes is
 /// rejected with [`BodyError::TooLarge`].
@@ -80,6 +83,7 @@ pub fn decode_body(content_encoding: &str, raw: &[u8]) -> Result<Vec<u8>, BodyEr
         }
         "gzip" | "x-gzip" => decode_gzip(raw),
         "zstd" => decode_zstd(raw),
+        "br" | "brotli" => decode_brotli(raw),
         other => Err(BodyError::UnsupportedEncoding(other.to_string())),
     }
 }
@@ -126,6 +130,29 @@ pub fn decode_zstd(raw: &[u8]) -> Result<Vec<u8>, BodyError> {
                 out.extend_from_slice(&chunk[..n]);
             }
             Err(e) => return Err(BodyError::Malformed(format!("zstd: {e}"))),
+        }
+    }
+}
+
+/// brotli decode with a hard output ceiling.
+///
+/// Same streaming-cap pattern as gzip/zstd: the read loop checks every
+/// chunk so a hostile stream can never allocate past the ceiling.
+pub fn decode_brotli(raw: &[u8]) -> Result<Vec<u8>, BodyError> {
+    use std::io::Read;
+    let mut out: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut decoder = brotli::Decompressor::new(raw, 64 * 1024);
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        match decoder.read(&mut chunk) {
+            Ok(0) => return Ok(out),
+            Ok(n) => {
+                if out.len() + n > MAX_DECOMPRESSED {
+                    return Err(BodyError::TooLarge);
+                }
+                out.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) => return Err(BodyError::Malformed(format!("brotli: {e}"))),
         }
     }
 }
@@ -186,9 +213,34 @@ mod tests {
     }
 
     #[test]
+    fn brotli_roundtrip_and_cap() {
+        use std::io::Read;
+        // The brotli crate ships the encoder too — roundtrip like the SDK.
+        let plain = b"sentry envelope with brotli (real sdk matrix)".repeat(50);
+        let mut enc = brotli::CompressorReader::new(plain.as_slice(), 4096, 5, 22);
+        let mut compressed = Vec::new();
+        enc.read_to_end(&mut compressed).unwrap();
+        assert!(compressed.len() < plain.len(), "fixture sanity: br must compress");
+        assert_eq!(decode_brotli(&compressed).unwrap(), plain);
+        assert_eq!(decode_body("br", &compressed).unwrap(), plain);
+        assert_eq!(decode_body("brotli", &compressed).unwrap(), plain);
+    }
+
+    #[test]
+    fn brotli_bomb_is_rejected_with_too_large() {
+        use std::io::Read;
+        let plain = vec![b'C'; 3 * 1024 * 1024];
+        let mut enc = brotli::CompressorReader::new(plain.as_slice(), 4096, 1, 22);
+        let mut bomb = Vec::new();
+        enc.read_to_end(&mut bomb).unwrap();
+        assert!(bomb.len() < 20 * 1024, "fixture sanity: bomb should compress tiny");
+        assert_eq!(decode_brotli(&bomb).unwrap_err(), BodyError::TooLarge);
+    }
+
+    #[test]
     fn unknown_encoding_rejected() {
         assert!(matches!(
-            decode_body("br", b"x"),
+            decode_body("deflate", b"x"),
             Err(BodyError::UnsupportedEncoding(_))
         ));
     }

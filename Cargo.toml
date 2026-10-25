@@ -47,6 +47,7 @@ tower = { version = "0.5", features = ["util"] }
 aho-corasick = "1"          # PII scrubber (SIMD multi-pattern matcher)
 roaring = "0.10"            # status-class / crash bitmap index
 flate2 = "1"                # gzip decode for Sentry/OTLP (rust backend, no C)
+brotli = "8"                # brotli decode: the official sentry-sdk ships envelopes Content-Encoding: br
 
 serde_json = "1"            # OTLP JSON + Sentry envelope parsing
 fastrand = "2"              # W3C trace/span id generation

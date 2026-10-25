@@ -212,7 +212,7 @@ Serve/run flags that matter: `--listen` `--upstream` `--data` `--webhooks
 | `BLACKBOX_ADMIN_TOKEN` | require `x-admin-token` on the admin API |
 | `BLACKBOX_COLD_ENDPOINT` / `_BUCKET` / `_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` | attach the S3/R2 cold tier (path-style; R2/MinIO compatible) |
 | `BLACKBOX_COLD_REGION` (default `us-east-1`) | SigV4 region |
-| `BLACKBOX_UPDATE_PUBKEY` | Ed25519 verifying key for `self-update` |
+| `BLACKBOX_VERIFY_PUBKEY` | override the Ed25519 verifying key for `self-update` (enterprise keys; `BLACKBOX_UPDATE_PUBKEY` still honored as the legacy name) |
 | `NO_COLOR` | plain demo/summary output |
 
 ## Storage watermarks & data layout
@@ -243,7 +243,7 @@ first touch; corrupt local replicas are healed from the bucket automatically.
 ```bash
 blackbox keygen --out-dir ./keys
 blackbox sign-update --key ./keys/blackbox_ed25519.key --input ./blackbox.new --out update.sig
-# on the server:
+# on the server (official releases verify against the compiled-in key — zero config):
 blackbox self-update --from ./blackbox.new --sig update.sig
 ```
 
@@ -251,6 +251,30 @@ Signature verify → redb snapshot → **isolated canary boot** (scratch data
 dir, real `/healthz` + redb roundtrip) → promote/rollback. A tampered or
 broken candidate can never touch the running binary; exit codes: `2` rejected
 signature, `3` rolled back.
+
+**Release key chain** — the verifying key resolves as: `--pubkey` >
+`BLACKBOX_VERIFY_PUBKEY` > legacy `BLACKBOX_UPDATE_PUBKEY` >
+`<data>/update.pub` > the **compiled-in official release key**
+(`77b44dc4dd7f50fef3dc959963050fb490e78a15a438aed18418ce2109a1f153`).
+Enterprise forks bake their own key at build time via
+`BLACKBOX_RELEASE_PUBKEY=<64 hex>`.
+
+## SDK compatibility matrix
+
+`scripts/sdk_matrix/` proves the wire contracts against the **official**
+`sentry-sdk` and `openai` Python clients on a real FastAPI app launched
+with `blackbox run` (no code changes, injected env only):
+
+```bash
+python3 scripts/sdk_matrix/run_matrix.py   # 13 legs: sentry crash capture
+                                           # + brotli envelopes, openai
+                                           # cache-HIT + dedup, replay
+```
+
+Behaviors pinned by live SDK runs and frozen as Rust regression tests
+(`verify_sdk`): `sentry-trace` injection so real SDK crash envelopes land
+on the proxy trace, brotli (`Content-Encoding: br`) envelope decoding, and
+`blackbox replay --target <URL>` form.
 
 ## Deployment snippets
 

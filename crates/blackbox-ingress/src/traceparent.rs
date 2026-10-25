@@ -20,6 +20,11 @@ use blackbox_core::schema::{parse_trace_hex, trace_id_to_hex, TraceId};
 pub const TRACE_ID_RESPONSE_HEADER: &str = "x-blackbox-trace-id";
 /// Request header per the W3C Trace Context spec.
 pub const TRACEPARENT_HEADER: &str = "traceparent";
+/// Sentry's proprietary trace header — the official sentry-sdk (all
+/// languages) continues a trace from this header when it arrives on an
+/// inbound request, so injecting it upstream is what makes a REAL SDK's
+/// crash envelope land on blackbox's trace instead of a random one.
+pub const SENTRY_TRACE_HEADER: &str = "sentry-trace";
 
 /// A validated W3C traceparent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +115,18 @@ impl Traceparent {
     pub fn trace_id_hex(&self) -> String {
         trace_id_to_hex(&self.trace_id)
     }
+
+    /// Sentry wire format: `<32-hex trace id>-<16-hex span id>-<sampled>`
+    /// — note there is NO version prefix (unlike W3C traceparent) and the
+    /// sampled flag is a bare `0`/`1`. The trace id space is identical
+    /// (128-bit), so the same id works in both headers.
+    pub fn to_sentry_trace(&self) -> String {
+        format!(
+            "{}-{}-1",
+            trace_id_to_hex(&self.trace_id),
+            hex8(&self.parent_span_id)
+        )
+    }
 }
 
 /// Format an 8-byte span id as 16 lowercase hex chars.
@@ -185,5 +202,25 @@ mod tests {
         let a = Traceparent::generate();
         let b = Traceparent::generate();
         assert_ne!(a.trace_id, b.trace_id);
+    }
+
+    #[test]
+    fn sentry_trace_format_matches_official_sdk_grammar() {
+        // sentry-trace: <32-hex trace id>-<16-hex span id>-<0|1> — 51 chars,
+        // NO version prefix. sentry-sdk parses exactly this shape.
+        let tp = Traceparent::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+            .unwrap();
+        let st = tp.to_sentry_trace();
+        assert_eq!(st.len(), 51, "32+1+16+1+1 = 51 chars: {st}");
+        assert_eq!(st, "4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1");
+        // The trace id segment is byte-identical to the W3C form — the same
+        // incident indexes under one id in both ecosystems.
+        let mut parts = st.split('-');
+        assert_eq!(
+            parts.next().unwrap(),
+            "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
+        assert_eq!(parts.next().unwrap(), "00f067aa0ba902b7");
+        assert_eq!(parts.next().unwrap(), "1");
     }
 }
