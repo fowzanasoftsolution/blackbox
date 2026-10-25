@@ -1,0 +1,6 @@
+.sim/
+child.pid
+status.json
+.sim-shop.db*
+app/shop.py.orig
+__pycache__/
