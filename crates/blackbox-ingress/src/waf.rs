@@ -222,9 +222,43 @@ mod tests {
 
     #[test]
     fn disabled_shield_is_transparent() {
+        // NOTE: no `blocked_attacks()` assertion here — BLOCKED_ATTACKS is a
+        // process-wide static and `cargo test` runs the suite's tests in
+        // parallel, so counting on any other test's traffic is a race. The
+        // increment-free behavior of the disabled path is structural:
+        // `check` returns None at the top of the function, before the
+        // `fetch_add` branch is reachable. The enabled-side bump behavior
+        // is covered by `enabled_block_bumps_the_counter`.
         let shield = ScannerShield::disabled();
-        assert!(shield.check("/.env").is_none());
-        assert_eq!(blocked_attacks(), 0);
+        assert!(!shield.is_enabled());
+        for path in [
+            "/.env",
+            "/.env.production",
+            "/.git/config",
+            "/wp-admin/setup.php",
+            "/wp-login.php",
+            "/../../etc/passwd",
+            "/%2e%2e/%2e%2e/etc/passwd",
+            "/phpmyadmin/index.php",
+            "/backup.sql",
+        ] {
+            assert!(shield.check(path).is_none(), "disabled shield must allow {path}");
+        }
+    }
+
+    #[test]
+    fn enabled_block_bumps_the_counter() {
+        // Race-proof: BLOCKED_ATTACKS is shared across parallel tests, so
+        // only assert monotonicity. Our own block's fetch_add alone
+        // guarantees a strictly larger value; concurrent blocks from other
+        // tests only push it further up.
+        let before = blocked_attacks();
+        let shield = ScannerShield::enabled();
+        assert!(shield.check("/.env").is_some());
+        assert!(
+            blocked_attacks() > before,
+            "an enabled shield must bump the counter for a blocked path"
+        );
     }
 
     #[test]
