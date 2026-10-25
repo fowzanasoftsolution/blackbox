@@ -3,6 +3,12 @@
 # `blackbox demo --once` boots the real 4-engine node (ingress shield+TLS,
 # queue leases, egress singleflight, cold tier) and runs the 5-act scenario
 # headlessly. If it exits 0, the binary is releasable.
+#
+# A second job runs the REAL-SDK compatibility matrix on every push/PR: the
+# release binary wraps a real FastAPI app carrying the OFFICIAL sentry-sdk
+# and openai-python clients (crash envelope, egress cache HIT, replay,
+# baggage parity), so wire-protocol regressions against real SDKs are
+# impossible to merge.
 name: CI
 
 on:
@@ -43,3 +49,47 @@ jobs:
 
       - name: End-to-end integration gate (blackbox demo --once)
         run: ./target/release/blackbox demo --once
+
+  sdk-compat:
+    name: real-SDK compat matrix (sentry-sdk + openai + @sentry/node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+
+      - name: Build (release)
+        run: cargo build --release --bin blackbox
+
+      - name: Install the official SDKs
+        run: |
+          python3 -m venv /tmp/sdkvenv
+          /tmp/sdkvenv/bin/pip install -q --disable-pip-version-check fastapi uvicorn sentry-sdk openai
+
+      - name: Real-SDK compatibility matrix (13+ legs)
+        env:
+          BLACKBOX_BIN: ${{ github.workspace }}/target/release/blackbox
+          MATRIX_PY: /tmp/sdkvenv/bin/python
+        run: /tmp/sdkvenv/bin/python scripts/sdk_matrix/run_matrix.py
+
+      - name: Upload matrix logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-matrix-logs
+          path: /tmp/bb-sdk-matrix/*.log
+          if-no-files-found: ignore
+
+      - name: Node @sentry/node baggage parity (if node present)
+        run: |
+          command -v node >/dev/null 2>&1 || { echo "node not present — skipping @sentry/node check"; exit 0; }
+          npm install --no-save --no-audit --no-fund @sentry/node@8
+          node scripts/sdk_matrix/node_parity.js

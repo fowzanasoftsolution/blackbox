@@ -20,7 +20,10 @@ use crate::rate_limit::{Decision, RateLimiter};
 use crate::scrub::Scrubber;
 use crate::tee::{capture_policy, CaptureBuf, Finalizer, TeeBody, CAPTURE_MAX_BYTES, CapturePolicy};
 use crate::tls::TlsState;
-use crate::traceparent::{Traceparent, SENTRY_TRACE_HEADER, TRACEPARENT_HEADER, TRACE_ID_RESPONSE_HEADER};
+use crate::traceparent::{
+    baggage_entries, merge_baggage, Traceparent, BAGGAGE_HEADER, SENTRY_TRACE_HEADER,
+    TRACEPARENT_HEADER, TRACE_ID_RESPONSE_HEADER,
+};
 use crate::waf::ScannerShield;
 use crate::writer::{RecordSink, WriterConfig};
 use blackbox_core::breaker::UpstreamHealth;
@@ -743,14 +746,55 @@ async fn handle_proxy(req: hyper::Request<Incoming>, ctx: Arc<ProxyCtx>) -> hype
     // attached to the injected SENTRY_DSN starts a random trace and its
     // crash envelope no longer lands next to the request that caused it.
     // Never overrides a caller-supplied sentry-trace.
-    if upstream_req.headers().get(SENTRY_TRACE_HEADER).is_none() {
-        match HeaderValue::from_str(&tp.to_sentry_trace()) {
-            Ok(hv) => {
-                upstream_req.headers_mut().insert(SENTRY_TRACE_HEADER, hv);
+    // `sentry_trace_upstream` records what actually rides upstream — ours
+    // when injected, the caller's own on passthrough — so the baggage
+    // entries below can never contradict it.
+    let sentry_trace_upstream: Option<String> =
+        match upstream_req.headers().get(SENTRY_TRACE_HEADER) {
+            Some(v) => v.to_str().ok().map(String::from),
+            None => {
+                let st = tp.to_sentry_trace();
+                match HeaderValue::from_str(&st) {
+                    Ok(hv) => {
+                        upstream_req.headers_mut().insert(SENTRY_TRACE_HEADER, hv);
+                        Some(st)
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "sentry-trace value build failed");
+                        return internal_error();
+                    }
+                }
             }
-            Err(e) => {
-                tracing::error!(error = %e, "sentry-trace value build failed");
-                return internal_error();
+        };
+    // Real-SDK parity (baggage): @sentry/node v8+ joins and propagates
+    // traces through the W3C `baggage` header (its dynamic-sampling
+    // context), and sentry-sdk (Python) carries the same `sentry-*`
+    // entries. Inject ours so the EXACT trace id rides the shared W3C bus
+    // too: absent → inject, present without `sentry-trace_id` → append
+    // (caller entries survive), key already present → untouched. The id
+    // comes from the upstream sentry-trace (32-hex guard skips malformed
+    // caller values) so the two headers always agree.
+    let baggage_tid = sentry_trace_upstream
+        .as_deref()
+        .and_then(|st| st.split('-').next())
+        .filter(|t| t.len() == 32);
+    if let Some(tid_hex) = baggage_tid {
+        let action = match upstream_req.headers().get(BAGGAGE_HEADER) {
+            None => Some(baggage_entries(tid_hex)),
+            Some(v) => v
+                .to_str()
+                .ok()
+                .and_then(|s| merge_baggage(Some(s), tid_hex)),
+        };
+        if let Some(bv) = action {
+            match HeaderValue::from_str(&bv) {
+                Ok(hv) => {
+                    upstream_req.headers_mut().insert(BAGGAGE_HEADER, hv);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "baggage value build failed");
+                    return internal_error();
+                }
             }
         }
     }

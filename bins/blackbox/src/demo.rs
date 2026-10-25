@@ -478,7 +478,13 @@ pub async fn run_demo(args: DemoArgs) -> Result<i32> {
         hold_ms: 3_000,
         egress_listen: "127.0.0.1:0".into(),
         admin_listen,
-        mem_budget_mb: 48,
+        // 256 MB: the demo process's OWN real footprint (redb mmaps, zstd
+        // seal buffers, 64 KB bodies in flight) sits right at the old 48 MB
+        // budget's Shed85 line, so head-sampling randomly dropped the bulk
+        // frames → no segment rotation → phase E flaked ~50% of runs. The
+        // RAM watermark behaviors are gate-tested separately with injected
+        // pressure (phase 4/5 gates); this scenario needs Normal throughout.
+        mem_budget_mb: 256,
         max_segment_mb: 1, // tiny segments → the scenario rotates for real
         disk_quota_mb: 4096,
         cold: Some(cold.clone()),

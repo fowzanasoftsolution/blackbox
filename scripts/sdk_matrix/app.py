@@ -71,6 +71,16 @@ def healthz():
     return {"ok": True}
 
 
+@app.post("/echo")
+def echo(incoming: Request):
+    """Header echo — exactly what the proxy injected upstream. These are the
+    bytes the official sentry-sdk ASGI middleware (and @sentry/node v8+ on a
+    Node app) parse to continue a trace: sentry-trace + baggage must carry
+    the SAME 32-hex trace id as x-blackbox-trace-id."""
+    pick = ("baggage", "sentry-trace", "traceparent", "x-blackbox-trace-id")
+    return {k: incoming.headers.get(k) for k in pick if incoming.headers.get(k) is not None}
+
+
 @app.post("/crash")
 def crash():
     # Uncaught on purpose — the official sentry-sdk ships the REAL envelope.

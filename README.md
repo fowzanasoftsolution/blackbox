@@ -266,15 +266,21 @@ Enterprise forks bake their own key at build time via
 with `blackbox run` (no code changes, injected env only):
 
 ```bash
-python3 scripts/sdk_matrix/run_matrix.py   # 13 legs: sentry crash capture
+python3 scripts/sdk_matrix/run_matrix.py   # 13+ legs: sentry crash capture
                                            # + brotli envelopes, openai
-                                           # cache-HIT + dedup, replay
+                                           # cache-HIT + dedup, replay,
+                                           # baggage parity
 ```
 
 Behaviors pinned by live SDK runs and frozen as Rust regression tests
 (`verify_sdk`): `sentry-trace` injection so real SDK crash envelopes land
-on the proxy trace, brotli (`Content-Encoding: br`) envelope decoding, and
-`blackbox replay --target <URL>` form.
+on the proxy trace, brotli (`Content-Encoding: br`) envelope decoding,
+`blackbox replay --target <URL>` form, and W3C `baggage` injection —
+`sentry-trace_id=<32-hex>,sentry-sampled=true` is injected/appended
+upstream (caller entries preserved, the key never duplicated) so
+@sentry/node v8+ and sentry-sdk propagate the exact same trace id across
+async boundaries. CI runs the whole matrix on every push/PR (`sdk-compat`
+job) plus an @sentry/node `continueTrace` parity check.
 
 ## Deployment snippets
 

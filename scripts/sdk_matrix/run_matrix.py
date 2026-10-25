@@ -54,9 +54,11 @@ def sh_env():
     return env
 
 
-def http(method, url, body=None, timeout=15):
+def http(method, url, body=None, timeout=15, headers=None):
     data = body if body is not None else (b"{}" if method == "POST" else None)
     req = urllib.request.Request(url, data=data, method=method)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read()
@@ -224,6 +226,33 @@ def main():
                 leg("replay/real-app", False, f"replayed /llm -> {e.code}: {e.read()!r:.300}")
             except Exception as e:
                 leg("replay/real-app", False, f"replay request failed: {e!r}")
+
+        # ---------------- leg 4: baggage parity (@sentry/node v8+) ---------
+        print("[4] baggage: sentry-trace_id + sentry-sampled on the W3C bus")
+        s, h, body = http("POST", f"{INGRESS}/echo")
+        tid = h.get("x-blackbox-trace-id", "")
+        bg = body.get("baggage", "")
+        st1 = body.get("sentry-trace", "")
+        leg("baggage/injected",
+            s == 200 and f"sentry-trace_id={tid}" in bg and "sentry-sampled=true" in bg,
+            f"proxy injected baggage: {bg!r}")
+        leg("baggage/parity-sentry-trace",
+            len(tid) == 32 and st1.split("-")[0] == tid,
+            "sentry-trace + baggage + x-blackbox-trace-id all carry one id")
+
+        s, h, body = http("POST", f"{INGRESS}/echo",
+                          headers={"baggage": "userId=42,session=abc"})
+        tid2 = h.get("x-blackbox-trace-id", "")
+        bg2 = body.get("baggage", "")
+        leg("baggage/caller-preserved",
+            bg2 == f"userId=42,session=abc,sentry-trace_id={tid2},sentry-sampled=true",
+            f"caller entries kept + blackbox entries appended: {bg2!r}")
+
+        s, _, body = http("POST", f"{INGRESS}/echo",
+                          headers={"baggage": "sentry-trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,foo=bar"})
+        leg("baggage/no-duplicate",
+            body.get("baggage") == "sentry-trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,foo=bar",
+            f"sentry-trace_id never duplicated: {body.get('baggage')!r}")
     finally:
         cleanup()
 

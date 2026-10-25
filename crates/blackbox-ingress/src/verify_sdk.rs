@@ -218,6 +218,13 @@ async fn real_sdk_envelope_correlates_via_injected_sentry_trace() {
         Some(trace_hdr.as_str()),
         "injected trace id == x-blackbox-trace-id"
     );
+    // @sentry/node v8+ parity: baggage DSC entries carry the SAME trace id.
+    let bg = req.header("baggage").expect("baggage injected upstream");
+    assert_eq!(
+        bg,
+        format!("sentry-trace_id={trace_hdr},sentry-sampled=true"),
+        "baggage entries must carry the exact same trace id: {bg}"
+    );
 
     // -- Act 2: the official SDK's crash envelope (wire-exact shape),
     //    continuing the trace it received via sentry-trace.
@@ -329,6 +336,15 @@ async fn caller_supplied_sentry_trace_is_never_overridden() {
         st, client_trace,
         "caller-supplied sentry-trace must be forwarded untouched"
     );
+    // Baggage parity: no caller baggage → injected, but carrying the
+    // CALLER's trace id (from their sentry-trace), never the freshly
+    // generated traceparent id — the two headers must agree upstream.
+    let bg = captured[0].header("baggage").expect("baggage injected");
+    assert_eq!(
+        bg,
+        "sentry-trace_id=4bf92f3577b34da6a3ce929d0e0e4736,sentry-sampled=true",
+        "baggage must carry the caller's sentry-trace id: {bg}"
+    );
 }
 
 /// W3C-only callers (OpenTelemetry SDKs) pass `traceparent` — the injected
@@ -360,5 +376,72 @@ async fn traceparent_passthrough_also_injects_matching_sentry_trace() {
         st.split('-').next(),
         Some("4bf92f3577b34da6a3ce929d0e0e4736"),
         "injected sentry-trace continues the SAME trace id: {st}"
+    );
+    let bg = captured[0]
+        .header("baggage")
+        .expect("baggage must also be injected for W3C-only callers");
+    assert_eq!(
+        bg,
+        "sentry-trace_id=4bf92f3577b34da6a3ce929d0e0e4736,sentry-sampled=true",
+        "baggage DSC carries the same trace id: {bg}"
+    );
+}
+
+/// A caller that carries its OWN W3C baggage (OTel tags, feature flags,
+/// user ids) must keep every entry upstream — blackbox APPENDS its
+/// sentry-* entries, it never rewrites the shared propagation bus.
+#[tokio::test(flavor = "multi_thread")]
+async fn caller_baggage_is_preserved_with_sentry_entries_appended() {
+    let mock = spawn_capture_app().await;
+    let proxy = spawn_proxy_for(mock.addr, "bag").await;
+
+    let (status, res_headers, _) = post_through_proxy(
+        &proxy,
+        "/work",
+        &[("baggage", "userId=42,session=abc")],
+        b"{}",
+    )
+    .await;
+    assert_eq!(status, 200);
+    let trace_hdr =
+        res_header(&res_headers, "x-blackbox-trace-id").expect("missing x-blackbox-trace-id");
+
+    let captured = mock.captured();
+    assert_eq!(captured.len(), 1);
+    let bg = captured[0].header("baggage").expect("baggage present");
+    assert_eq!(
+        bg,
+        format!("userId=42,session=abc,sentry-trace_id={trace_hdr},sentry-sampled=true"),
+        "caller entries first, blackbox entries appended: {bg}"
+    );
+    // the appended id agrees with the injected sentry-trace on the SAME request
+    let st = captured[0]
+        .header("sentry-trace")
+        .expect("sentry-trace injected");
+    assert_eq!(
+        st.split('-').next(),
+        Some(trace_hdr),
+        "sentry-trace and baggage must carry one trace id"
+    );
+}
+
+/// A caller whose baggage ALREADY carries `sentry-trace_id` (a real Sentry
+/// SDK sits two hops upstream) passes through byte-identical — the key is
+/// never duplicated on the shared bus.
+#[tokio::test(flavor = "multi_thread")]
+async fn baggage_sentry_trace_id_is_never_duplicated() {
+    let mock = spawn_capture_app().await;
+    let proxy = spawn_proxy_for(mock.addr, "bagdup").await;
+
+    let caller = "sentry-trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,foo=bar";
+    let (status, _, _) = post_through_proxy(&proxy, "/work", &[("baggage", caller)], b"{}").await;
+    assert_eq!(status, 200);
+
+    let captured = mock.captured();
+    assert_eq!(captured.len(), 1);
+    let bg = captured[0].header("baggage").expect("baggage present");
+    assert_eq!(
+        bg, caller,
+        "baggage carrying sentry-trace_id must pass through untouched"
     );
 }

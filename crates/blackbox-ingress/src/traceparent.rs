@@ -25,6 +25,12 @@ pub const TRACEPARENT_HEADER: &str = "traceparent";
 /// inbound request, so injecting it upstream is what makes a REAL SDK's
 /// crash envelope land on blackbox's trace instead of a random one.
 pub const SENTRY_TRACE_HEADER: &str = "sentry-trace";
+/// W3C Baggage header — the shared propagation bus the Sentry dynamic
+/// sampling context rides on. @sentry/node v8+ joins and propagates traces
+/// through it (alongside `sentry-trace`), and sentry-sdk (Python) carries
+/// the same `sentry-*` entries, so injecting ours upstream is what makes
+/// the EXACT same trace id survive async boundaries in the Node world too.
+pub const BAGGAGE_HEADER: &str = "baggage";
 
 /// A validated W3C traceparent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +133,53 @@ impl Traceparent {
             hex8(&self.parent_span_id)
         )
     }
+
+    /// The Sentry dynamic-sampling-context entries carrying THIS trace id
+    /// (see [`baggage_entries`]) — byte-identical id to `traceparent` and
+    /// `sentry-trace`.
+    pub fn to_baggage_entries(&self) -> String {
+        baggage_entries(&trace_id_to_hex(&self.trace_id))
+    }
+}
+
+/// Sentry dynamic-sampling-context entries for the W3C `baggage` header —
+/// the exact key/value grammar @sentry/node v8+ and sentry-sdk emit and
+/// parse: `sentry-trace_id=<32-hex>,sentry-sampled=true`.
+pub fn baggage_entries(trace_id_hex: &str) -> String {
+    format!("sentry-trace_id={trace_id_hex},sentry-sampled=true")
+}
+
+/// Merge blackbox's sentry-* entries into the caller's `baggage` header.
+///
+/// * no existing baggage → inject ours fresh.
+/// * baggage without `sentry-trace_id` → append ours — W3C baggage is a
+///   SHARED propagation bus, so caller entries (OTel, feature flags, user
+///   ids) must survive untouched.
+/// * baggage already carrying `sentry-trace_id` (case-insensitive per the
+///   W3C baggage key rule) → `None`: never duplicate the key.
+pub fn merge_baggage(existing: Option<&str>, trace_id_hex: &str) -> Option<String> {
+    let ours = baggage_entries(trace_id_hex);
+    match existing {
+        None => Some(ours),
+        Some(v) if v.trim().is_empty() => Some(ours),
+        Some(v) => {
+            if baggage_has_sentry_trace_id(v) {
+                None
+            } else {
+                Some(format!("{v},{ours}"))
+            }
+        }
+    }
+}
+
+fn baggage_has_sentry_trace_id(value: &str) -> bool {
+    value.split(',').any(|member| {
+        member
+            .trim()
+            .split_once('=')
+            .map(|(k, _)| k.trim().eq_ignore_ascii_case("sentry-trace_id"))
+            .unwrap_or(false)
+    })
 }
 
 /// Format an 8-byte span id as 16 lowercase hex chars.
@@ -195,6 +248,71 @@ mod tests {
         ] {
             assert!(Traceparent::parse(bad).is_none(), "must reject {bad:?}");
         }
+    }
+
+    #[test]
+    fn baggage_entries_match_sentry_dsc_grammar() {
+        let entries = baggage_entries("4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(
+            entries,
+            "sentry-trace_id=4bf92f3577b34da6a3ce929d0e0e4736,sentry-sampled=true"
+        );
+        // via the Traceparent method: same bytes as sentry-trace's id segment
+        let tp = Traceparent::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+            .unwrap();
+        assert_eq!(
+            tp.to_baggage_entries(),
+            "sentry-trace_id=4bf92f3577b34da6a3ce929d0e0e4736,sentry-sampled=true"
+        );
+    }
+
+    #[test]
+    fn baggage_injected_when_absent_appended_when_present() {
+        let tid = "4bf92f3577b34da6a3ce929d0e0e4736";
+        // absent → inject fresh
+        assert_eq!(
+            merge_baggage(None, tid).as_deref(),
+            Some("sentry-trace_id=4bf92f3577b34da6a3ce929d0e0e4736,sentry-sampled=true")
+        );
+        // present without sentry keys → append, caller entries preserved
+        assert_eq!(
+            merge_baggage(Some("userId=42,session=abc"), tid).as_deref(),
+            Some(
+                "userId=42,session=abc,sentry-trace_id=4bf92f3577b34da6a3ce929d0e0e4736,sentry-sampled=true"
+            )
+        );
+        // empty / whitespace-only baggage behaves like absent
+        assert_eq!(merge_baggage(Some(""), tid), merge_baggage(None, tid));
+        assert_eq!(merge_baggage(Some("   "), tid), merge_baggage(None, tid));
+    }
+
+    #[test]
+    fn baggage_never_duplicates_sentry_trace_id() {
+        let tid = "4bf92f3577b34da6a3ce929d0e0e4736";
+        // exact key already present → untouched (None)
+        assert_eq!(
+            merge_baggage(
+                Some("sentry-trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,foo=bar"),
+                tid
+            ),
+            None
+        );
+        // case-insensitive per the W3C baggage key rule
+        assert_eq!(
+            merge_baggage(Some("SENTRY-TRACE_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), tid),
+            None
+        );
+        // whitespace after commas tolerated
+        assert_eq!(
+            merge_baggage(
+                Some("foo=bar, sentry-trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                tid
+            ),
+            None
+        );
+        // near-miss keys do NOT count
+        assert!(merge_baggage(Some("sentry-traceid=x,foo=bar"), tid).is_some());
+        assert!(merge_baggage(Some("trace_id=x"), tid).is_some());
     }
 
     #[test]
