@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! blackbox keygen --out-dir keys/
-//! blackbox sign-update --key keys/blackbox_ed25519.key --in new-binary --out sig.hex
-//! blackbox self-update --from new-binary --sig sig.hex [--pubkey hex|--env|--keys file]
+//! blackbox sign-update --key keys/blackbox_ed25519.key --input new-binary --out sig.hex
+//! blackbox self-update --from new-binary --sig sig.hex [--pubkey hex] [--data dir]
 //! ```
 //!
 //! Update pipeline (each step aborts before the next on failure):

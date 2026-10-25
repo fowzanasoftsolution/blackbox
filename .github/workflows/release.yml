@@ -148,7 +148,7 @@ jobs:
             chmod 600 "${KEYF}"
             for f in blackbox-x86_64 blackbox-aarch64; do
               [ -f "$f" ] || continue
-              OUT="$(./blackbox-x86_64 sign-update --key "@${KEYF}" --in "$f" --out "$f.sig")"
+              OUT="$(./blackbox-x86_64 sign-update --key "@${KEYF}" --input "$f" --out "$f.sig")"
               echo "$OUT" | sed -n 's/^verifying-key: //p' > "$f.pub"
               echo "signed $f"
             done
@@ -191,11 +191,11 @@ jobs:
             echo '```'
             echo
             echo 'Verify checksums: `sha256sum -c SHA256SUMS`'
-            if ls ship/blackbox-*.pub >/dev/null 2>&1; then
+            if ls blackbox-*.pub >/dev/null 2>&1; then
               echo
               echo 'Ed25519 verifying key (pin for `blackbox self-update`):'
               echo '```'
-              for p in ship/blackbox-*.pub; do
+              for p in blackbox-*.pub; do
                 echo "$(basename "$p"): $(cat "$p")"
               done
               echo '```'
