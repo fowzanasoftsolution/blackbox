@@ -31,8 +31,10 @@ pub mod flight;
 pub mod gateway;
 pub mod key;
 pub mod ledger;
+pub mod simhash;
 pub mod validate;
 pub mod verify4;
+pub mod verify5;
 
 pub use cache::{CachedEntry, ResponseCache};
 pub use flight::{FlightTable, UpstreamOutcome};

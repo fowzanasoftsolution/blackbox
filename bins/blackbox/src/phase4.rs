@@ -145,6 +145,11 @@ pub async fn spawn_node(cfg: NodeConfig) -> Result<NodeHandle> {
     // The data dir must exist before redb opens jobs.redb (first-run UX:
     // `blackbox run --data ./fresh` must just work).
     std::fs::create_dir_all(&cfg.data).context("create data dir")?;
+    // Audit chain (v1.1, ON by default — `BLACKBOX_AUDIT=0` disables): every
+    // queue/env/gateway/cold state-touch is appended + hash-chained here.
+    if std::env::var("BLACKBOX_AUDIT").as_deref() != Ok("0") {
+        let _ = blackbox_core::audit::init(&cfg.data);
+    }
     let health = blackbox_core::breaker::UpstreamHealth::new(3);
 
     // ---- Phase 7: native TLS termination (before the ingress boots). ---
@@ -259,6 +264,7 @@ pub async fn spawn_node(cfg: NodeConfig) -> Result<NodeHandle> {
         egress: Some(blackbox_egress::EgressHandle {
             local_addr: egress.local_addr,
             cache: Arc::clone(&egress.cache),
+            near: Arc::clone(&egress.near),
             ledger: Arc::clone(&egress.ledger),
             flights: Arc::clone(&egress.flights),
             recorded: Arc::clone(&egress.recorded),

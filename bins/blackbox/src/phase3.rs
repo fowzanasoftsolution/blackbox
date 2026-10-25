@@ -142,6 +142,17 @@ pub async fn replay(
         data
     };
 
+    // Audit chain: for a live-locked replay this is the SCRATCH copy — every
+    // replay event extends the copied chain there; the live node is never
+    // touched (v1.0.3 discipline, now v1.1-compliant audit records too).
+    let _ = blackbox_core::audit::init(&data);
+    blackbox_core::audit::record(
+        "replay",
+        "start",
+        &blackbox_core::schema::trace_id_to_hex(&trace_id),
+        &format!("target={target}"),
+    );
+
     // Phase 6: when the cold tier is configured, transparently restore the
     // trace's segment if it was FIFO-evicted (or bit-rotted) BEFORE loading
     // the replay engine — time-travel replay reads through S3/R2. With the

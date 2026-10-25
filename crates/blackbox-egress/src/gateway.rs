@@ -23,6 +23,7 @@
 use crate::cache::{header, CachedEntry, ResponseCache};
 use crate::flight::{self, FlightResult, FlightTable, Join, UpstreamOutcome};
 use crate::key::{self, composite_key};
+use crate::simhash::{self, NearCache};
 use crate::ledger::{parse_cost_header, parse_usage, CostLedger, LedgerKey, RequestKind};
 use blackbox_core::egress_key::{canonical_url, fingerprint};
 use blackbox_core::schema::{
@@ -72,6 +73,9 @@ pub struct EgressConfig {
     pub cache_max_bytes: usize,
     /// Ledger persistence directory (`finops.redb` inside).
     pub data_dir: std::path::PathBuf,
+    /// Near-duplicate (SimHash L1) Hamming budget. `None` disables. The
+    /// default reads `BLACKBOX_SIMHASH_MAXDIST` (absent → 3).
+    pub near_dist: Option<u64>,
 }
 
 impl Default for EgressConfig {
@@ -81,6 +85,7 @@ impl Default for EgressConfig {
             cache_max_entries: 256,
             cache_max_bytes: 4 * 1024 * 1024,
             data_dir: std::path::PathBuf::from("./data"),
+            near_dist: simhash::max_dist_from_env(),
         }
     }
 }
@@ -89,6 +94,7 @@ impl Default for EgressConfig {
 pub struct EgressHandle {
     pub local_addr: SocketAddr,
     pub cache: Arc<ResponseCache>,
+    pub near: Arc<NearCache>,
     pub ledger: Arc<CostLedger>,
     pub flights: Arc<FlightTable>,
     pub recorded: Arc<AtomicU64>,
@@ -101,6 +107,7 @@ impl EgressHandle {
     /// (transition-triggered), instantly via the supervisor watch hub.
     pub fn attach_self_healing(&self) {
         let cache = Arc::clone(&self.cache);
+        let near = Arc::clone(&self.near);
         let mut rx = blackbox_supervisor::memory::subscribe_ram_level();
         tokio::spawn(async move {
             let mut last = *rx.borrow();
@@ -113,6 +120,10 @@ impl EgressHandle {
                     && last < blackbox_supervisor::memory::RamLevel::Warn75
                 {
                     cache.purge_all(&format!(
+                        "supervisor watermark {:?} (self-healing RAM shed)",
+                        level
+                    ));
+                    near.purge_all(&format!(
                         "supervisor watermark {:?} (self-healing RAM shed)",
                         level
                     ));
@@ -131,6 +142,7 @@ pub async fn spawn_egress(cfg: EgressConfig, emit: EmitFn) -> Result<EgressHandl
     let local_addr = listener.local_addr()?;
 
     let cache = Arc::new(ResponseCache::new(cfg.cache_max_entries, cfg.cache_max_bytes));
+    let near = Arc::new(NearCache::new(cfg.near_dist.unwrap_or(0)));
     let ledger = CostLedger::open(&cfg.data_dir)?;
     let flights = Arc::new(FlightTable::new());
     let recorded = Arc::new(AtomicU64::new(0));
@@ -152,6 +164,7 @@ pub async fn spawn_egress(cfg: EgressConfig, emit: EmitFn) -> Result<EgressHandl
 
     let state = Arc::new(EgressState {
         cache: Arc::clone(&cache),
+        near: Arc::clone(&near),
         ledger: Arc::clone(&ledger),
         flights: Arc::clone(&flights),
         client,
@@ -194,6 +207,7 @@ pub async fn spawn_egress(cfg: EgressConfig, emit: EmitFn) -> Result<EgressHandl
     Ok(EgressHandle {
         local_addr,
         cache,
+        near,
         ledger,
         flights,
         recorded,
@@ -204,6 +218,7 @@ pub async fn spawn_egress(cfg: EgressConfig, emit: EmitFn) -> Result<EgressHandl
 
 struct EgressState {
     cache: Arc<ResponseCache>,
+    near: Arc<NearCache>,
     ledger: Arc<CostLedger>,
     flights: Arc<FlightTable>,
     client: Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>,
@@ -485,7 +500,39 @@ async fn handle_request(
             0,
             entry.cost_micros,
         );
+        blackbox_core::audit::record("egress", "cache_hit", &trace_hex, "exact-l0");
         return entry_response(&entry, "HIT", trace_hex);
+    }
+
+    // 1b) Near-duplicate lookup (SimHash L1, behind the exact L0 hit).
+    //     Same scope (tenant ‖ auth ‖ route ‖ CONTROL knobs), prompt text
+    //     within an under-sampling-deterministic Hamming budget.
+    let near_hint = simhash::prepare(
+        &ledger_key.tenant,
+        &auth,
+        &method,
+        &canon,
+        &path,
+        body.as_ref(),
+    );
+    if let Some((ref nk, sh)) = near_hint {
+        if let Some((entry, d)) = state.near.lookup(nk, sh) {
+            state.ledger.record(
+                ledger_key.clone(),
+                RequestKind::CacheHit,
+                0,
+                entry.tokens,
+                0,
+                entry.cost_micros,
+            );
+            blackbox_core::audit::record(
+                "egress",
+                "near_hit",
+                &trace_hex,
+                &format!("d={d} simhash={sh:016x}"),
+            );
+            return entry_response(&entry, &format!("SIMHASH(d={d})"), trace_hex);
+        }
     }
 
     // 2) Singleflight join (leader spawns the DETACHED upstream task).
@@ -501,6 +548,7 @@ async fn handle_request(
             fwd_headers.clone(),
             trace_id,
             Bytes::from(body.clone()),
+            near_hint,
         );
     }
 
@@ -564,6 +612,7 @@ fn spawn_leader(
     fwd_headers: Vec<(String, String)>,
     trace_id: TraceId,
     body: Bytes,
+    near_hint: Option<([u8; 32], u64)>,
 ) {
     tokio::spawn(async move {
         let outcome =
@@ -577,16 +626,19 @@ fn spawn_leader(
                     &o.body,
                 );
                 if verdict == crate::validate::Verdict::Cacheable {
-                    state.cache.insert(
-                        ckey,
-                        CachedEntry {
-                            status: o.status,
-                            headers: o.headers.clone(),
-                            body: o.body.clone(),
-                            tokens: o.tokens,
-                            cost_micros: o.cost_micros,
-                        },
-                    );
+                    let ent = CachedEntry {
+                        status: o.status,
+                        headers: o.headers.clone(),
+                        body: o.body.clone(),
+                        tokens: o.tokens,
+                        cost_micros: o.cost_micros,
+                    };
+                    state.cache.insert(ckey, ent.clone());
+                    // Register in the near index: near variants of this
+                    // prompt can now be answered without an upstream call.
+                    if let Some((nk, sh)) = near_hint {
+                        state.near.record(nk, sh, ent);
+                    }
                 } else {
                     tracing::debug!(
                         verdict = ?verdict,
@@ -600,6 +652,12 @@ fn spawn_leader(
                     0,
                     o.cost_micros,
                     0,
+                );
+                blackbox_core::audit::record(
+                    "egress",
+                    "upstream",
+                    &blackbox_core::schema::trace_id_to_hex(&trace_id),
+                    &format!("status={} tokens={} cost_micros={}", o.status, o.tokens, o.cost_micros),
                 );
                 state.flights.publish(ckey, Ok(o));
                 state.flights.finish(ckey);

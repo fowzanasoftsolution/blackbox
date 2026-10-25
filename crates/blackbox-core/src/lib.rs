@@ -14,6 +14,7 @@
 //! 4. [`queue_actor`] — single-writer group-commit actor over `redb`: bounded mpsc,
 //!    5 ms / 1 000-op ACID batch commits, 250 ms reader timeout.
 
+pub mod audit;
 pub mod breaker;
 pub mod compactor;
 pub mod egress_key;

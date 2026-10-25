@@ -240,6 +240,12 @@ async fn deliver_job(
             health.record_success();
             let _ = store.succeed(job.job_id).await;
             tracing::debug!(job = job.job_id, status = s, "delivered in {elapsed_ms}ms");
+            blackbox_core::audit::record(
+                "queue",
+                "deliver",
+                &blackbox_core::schema::trace_id_to_hex(&job.trace_id),
+                &format!("queue={} status={} attempt={}", job.queue, s, job.attempt + 1),
+            );
             emit_event(events, &job, QueueEventKind::Delivered { attempt: job.attempt + 1, status: s }).await;
         }
         DeliveryVerdict::Retryable => {
@@ -260,6 +266,12 @@ async fn deliver_job(
                 .await;
             if dead {
                 tracing::warn!(job = job.job_id, attempts = attempt, "dead-lettered: {err}");
+                blackbox_core::audit::record(
+                    "queue",
+                    "dead_letter",
+                    &blackbox_core::schema::trace_id_to_hex(&job.trace_id),
+                    &format!("queue={} status={} error={err}", job.queue, status.unwrap_or(0)),
+                );
                 emit_event(events, &job, QueueEventKind::DeadLettered { attempt, status: status.unwrap_or(0), error: err }).await;
             } else {
                 tracing::debug!(job = job.job_id, attempt, delay_ms, "retry scheduled: {err}");

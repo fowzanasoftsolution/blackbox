@@ -206,11 +206,17 @@ enum Cmd {
         #[command(subcommand)]
         mode: QueueMode,
     },
+    /// Tamper-evident audit-chain administration (v1.1).
+    Audit {
+        #[command(subcommand)]
+        mode: AuditMode,
+    },
     /// Phase 3 verification gates: 1 = zero-lost-webhooks chaos,
     /// 2 = invisible app restart (connection hold), 3 = replay sandbox.
     P3Gate { n: u8 },
     /// Phase 4 verification gates: 1 = singleflight/FinOps savings,
-    /// 2 = cache poisoning guard, 3 = self-healing RAM shed + audit.
+    /// 2 = cache poisoning guard, 3 = self-healing RAM shed + audit,
+    /// 4 = SimHash near-duplicate prompt cache, 5 = tamper-evident audit.
     P4Gate { n: u8 },
     /// Phase 5 verification gates: 1 = hot-to-cold .zst rollover + cold
     /// replay + 85% eviction, 2 = zero-config auto-resurrection,
@@ -323,6 +329,39 @@ enum QueueMode {
         #[arg(long, default_value = "./data")]
         data: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum AuditMode {
+    /// Recompute the full SHA-256 chain of `<data>/audit.log`; exit 2 on any
+    /// tamper (edit / insert / delete / anchor divergence).
+    Verify {
+        #[arg(long, default_value = "./data")]
+        data: PathBuf,
+        /// Exported anchor `seq:64-hex` (from `audit current-anchor` /
+        /// external storage) — fails when the chain ends before or diverges
+        /// from it (truncation detection).
+        #[arg(long)]
+        anchor: Option<String>,
+    },
+    /// Print the chain's current anchor (`seq:hash`, read from the file
+    /// tail) for external anchoring / `audit verify --anchor`.
+    CurrentAnchor {
+        #[arg(long, default_value = "./data")]
+        data: PathBuf,
+    },
+}
+
+/// `seq:64-hex` anchor parsing for `audit verify --anchor`.
+fn parse_anchor(spec: &str) -> anyhow::Result<(u64, String)> {
+    let (seq_s, hash) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("anchor must be `seq:64-hex`, got {spec:?}"))?;
+    let seq: u64 = seq_s.parse().map_err(|_| anyhow::anyhow!("anchor seq is not a number: {seq_s:?}"))?;
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("anchor hash must be 64 hex chars, got {hash:?}");
+    }
+    Ok((seq, hash.to_ascii_lowercase()))
 }
 
 #[derive(Subcommand)]
@@ -510,6 +549,42 @@ async fn main() -> Result<()> {
             QueueMode::Status { data } => phase3::queue_status(data).await?,
             QueueMode::RetryDlq { data } => phase3::queue_retry_dlq(data).await?,
         },
+        Cmd::Audit { mode } => match mode {
+            AuditMode::Verify { data, anchor } => {
+                let expected = match anchor.as_deref() {
+                    None => None,
+                    Some(spec) => Some(parse_anchor(spec)?),
+                };
+                match blackbox_core::audit::verify(&data, expected) {
+                    Ok(s) => {
+                        println!(
+                            "audit OK: {} record(s), {} checkpoint(s), last seq {} · anchor {}",
+                            s.records, s.checkpoints, s.last_seq, s.last_anchor
+                        );
+                        for (src, n) in &s.per_src {
+                            println!("  {src}: {n}");
+                        }
+                    }
+                    Err(f) => {
+                        eprintln!(
+                            "audit TAMPER at line {}: {}",
+                            if f.line_no == 0 { "-".to_string() } else { format!("#{}", f.line_no) },
+                            f.reason
+                        );
+                        std::process::exit(2);
+                    }
+                }
+            }
+            AuditMode::CurrentAnchor { data } => {
+                match blackbox_core::audit::read_anchor(&data) {
+                    Some((seq, hash)) => println!("{seq}:{hash}"),
+                    None => {
+                        eprintln!("no audit chain at {} (empty or absent audit.log)", data.display());
+                        std::process::exit(1);
+                    }
+                }
+            }
+        },
         Cmd::P3Gate { n } => match n {
             1 => blackbox_ingress::verify3::gate1().await.map_err(|e| anyhow::anyhow!("{e}"))?,
             2 => blackbox_ingress::verify3::gate2().await.map_err(|e| anyhow::anyhow!("{e}"))?,
@@ -520,7 +595,12 @@ async fn main() -> Result<()> {
             1 => blackbox_egress::gate1().await.map_err(|e| anyhow::anyhow!("{e}"))?,
             2 => blackbox_egress::gate2().await.map_err(|e| anyhow::anyhow!("{e}"))?,
             3 => blackbox_egress::gate3().await.map_err(|e| anyhow::anyhow!("{e}"))?,
-            _ => anyhow::bail!("p4gate must be 1, 2 or 3"),
+            4 => blackbox_egress::verify5::gate_near()
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+            5 => blackbox_egress::verify5::gate_audit()
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+            _ => anyhow::bail!("p4gate must be 1..5"),
         },
         Cmd::P5Gate { n } => match n {
             1 => phase5::gate1().await?,

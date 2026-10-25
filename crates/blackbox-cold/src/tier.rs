@@ -588,6 +588,13 @@ impl ColdTier {
             return Ok(None);
         }
 
+        blackbox_core::audit::record(
+            "cold",
+            "restore",
+            &blackbox_core::schema::trace_id_to_hex(trace_id),
+            &format!("segment={seg}"),
+        );
+
         // Read the trace's frames straight from the (possibly restored)
         // sidecar — no full-directory rescan.
         let mut records: Vec<TraceRecord> = Vec::new();

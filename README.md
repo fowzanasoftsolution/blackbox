@@ -21,10 +21,11 @@ changes.
                                  your app (any language)      S3 / R2 cold tier
 ```
 
-**v1.2 status — all seven phases complete.** 183 workspace tests green in
-release, **19/19 verification gates passing**, binary **16.9 MB**, load RSS
-**33 MB** (48 MB budget). Phase 7 adds the launch polish: a lock-free request
-shield, native TLS with zero-downtime cert reload, and a one-command demo.
+**v1.1 status — all seven phases complete + the Pro differentiators.** 201
+workspace tests green in release, **21/21 verification gates passing**, binary
+**17.1 MB**, load RSS **33 MB** (48 MB budget). v1.1 ships the two
+Pro differentiators as pure Rust: a SimHash near-duplicate prompt cache and a
+tamper-evident audit chain.
 
 ---
 
@@ -174,6 +175,52 @@ while crashes/queue jobs survive at 100 %. Bit-rot is **self-healing**: a
 CRC/decompress failure on read transparently pulls the digest-verified
 replica from the cold tier and atomically replaces the damaged file.
 
+## The Pro differentiators (v1.1)
+
+Built to the product blueprint §6 spec — pure Rust, **zero ML models, zero
+new dependencies**:
+
+### SimHash near-duplicate prompt cache (L1 behind the exact match)
+
+`OPENAI_BASE_URL` traffic pays upstream **once per prompt family**: byte-equal
+calls hit the L0 exact cache, and a near variant — JSON key-order shuffle,
+punctuation, case, whitespace, or a drifted order-id inside the prompt — is
+then served **byte-identically** from the near cache, flagged
+`x-blackbox-cache: SIMHASH(d=0..3)`:
+
+* normalize (lowercase, punctuation → space, whitespace collapse, digit runs
+  → `#`) → word 3-shingles → FNV-1a → 64-bit Charikar SimHash; a hit is a
+  Hamming distance ≤ 3 (`BLACKBOX_SIMHASH_MAXDIST=0` disables the near cache),
+* the near key is `BLAKE3(tenant ‖ auth ‖ method ‖ URL ‖ CONTROL)` where
+  CONTROL freezes model, sampling knobs (temperature/top_p/n — deterministic
+  prompts only), tools, roles and message shapes: only prompt *text* drifts,
+* `/v1/embeddings` and `/v1/moderations` are excluded; the 75 % RAM watermark
+  purges the near cache together with L0 (self-healing).
+
+Measured: **1 upstream call answered a 1,001-request variant storm**
+(all ≤ d=3, byte-identical), escape classes — a genuinely different prompt,
+`temperature 0.7`, a different tenant — all paid upstream, and the whole
+`prepare()` pipeline runs at **3.4 µs/prompt** (budget < 5 µs).
+
+### Tamper-evident audit chain
+
+Every queue, egress, replay and cold-tier state touch is appended to
+`<data>/audit.log` as a SHA-256 hash-chained JSONL record — interior edits,
+insertions and deletions all break the chain at their line. Every 1,024
+records a checkpoint line commits the running anchor and fsyncs; export the
+anchor externally (`blackbox audit current-anchor` → a KMS/cosign note) and
+any **history truncation** becomes detectable on re-import. Verify any time:
+
+```bash
+blackbox audit verify --data ./data            # full recompute; exit 2 on tamper
+blackbox audit verify --data ./data --anchor 5:8e9fd718…   # pinned history
+blackbox audit current-anchor --data ./data    # print seq:hash for external anchoring
+```
+
+Zero signing keys needed — the chain is self-verifying locally and
+enterprises pin their own anchor. Auditing is **on by default**
+(`BLACKBOX_AUDIT=0` escapes).
+
 ## Admin dashboard
 
 ```
@@ -200,6 +247,9 @@ blackbox replay <tid>  deterministic time-travel replay against --target.
                        mocks replay verbatim, unrecorded egress is 428-blocked,
                        the live node is never touched
 blackbox queue status|retry-dlq      offline queue administration
+blackbox audit verify|current-anchor offline audit-chain verification
+                                     (--data, optional --anchor seq:hash;
+                                     verify exits 2 on any tamper)
 blackbox self-update  Ed25519-verified canary update (auto-rollback)
 blackbox keygen | sign-update        update signing tooling
 blackbox harness | bench | p2..p7-gate   verification harnesses
@@ -217,14 +267,17 @@ Serve/run flags that matter: `--listen` `--upstream` `--data` `--webhooks
 | `BLACKBOX_ADMIN_TOKEN` | require `x-admin-token` on the admin API |
 | `BLACKBOX_COLD_ENDPOINT` / `_BUCKET` / `_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` | attach the S3/R2 cold tier (path-style; R2/MinIO compatible) |
 | `BLACKBOX_COLD_REGION` (default `us-east-1`) | SigV4 region |
+| `BLACKBOX_SIMHASH_MAXDIST` | near-duplicate cache Hamming budget (default `3`; `0` disables the L1 near cache) |
+| `BLACKBOX_AUDIT` | set `0` to disable the tamper-evident audit chain (on by default) |
 | `BLACKBOX_VERIFY_PUBKEY` | override the Ed25519 verifying key for `self-update` (enterprise keys; `BLACKBOX_UPDATE_PUBKEY` still honored as the legacy name) |
 | `NO_COLOR` | plain demo/summary output |
 
 ## Storage watermarks & data layout
 
 `<data>/` holds `segment_NNNNNN.log[.zst]` (+ `.idx`), `jobs.redb` (queue),
-`finops.redb` (ledger), `cold.redb` (tier index) and `tls/` (generated certs).
-RAM watermarks on the 48 MB budget: 75 % → purge egress cache · 85 % → head-
+`finops.redb` (ledger), `cold.redb` (tier index), `audit.log` (hash-chained
+JSONL) and `tls/` (generated certs). RAM watermarks on the 48 MB budget:
+75 % → purge egress + near caches · 85 % → head-
 sample healthy 2xx telemetry · 95 % → backpressure. Disk watermarks on the
 4 GB quota: 75 % → aggressive compaction · 85 % → FIFO evict cold segments ·
 95 % → survival shedding (crashes + queue jobs always survive).
@@ -321,13 +374,13 @@ CMD ["blackbox", "run", "--listen", "0.0.0.0:8080", "--data", "/data", "--", "/s
 | 1 | torn write / bit-flip / kill -9 recovery | deterministic harness: **PASS** (crash-pinned fsync discipline) |
 | 2 | causal link · stream safety · throughput | 3-record causal chain + PII redaction · 50 MB intact, bombs 413 · **31,029 req/s, p99 Δ166 µs, RSS 33.1 MB** |
 | 3 | zero-lost webhooks · invisible restart · replay | **5000/5000** HMAC-intact, 0 dupes · **43,973 req, 0 failures** across a real app kill · replay 200-exact + 428 sandbox |
-| 4 | singleflight · soft-error guard · RAM shed | 50 req/2 tenants → 2 upstream, 96 % saved · poisoned response never cached · Warn75 purge → 0 |
+| 4 | singleflight · soft-error guard · RAM shed · SimHash near-cache · audit chain | 50 req/2 tenants → 2 upstream, 96 % saved · poisoned response never cached · Warn75 purge → 0 · **1 upstream call for 1,001 near variants** (all ≤ SIMHASH(d=3), byte-identical), 3 escape classes pay upstream, prepare() **3.4 µs/prompt** (< 5 µs) · 5-record chain verifies; edit → **hash break @line 2**, deletion → **seq break @line 4**, truncation vs exported anchor faults pre-pass, unanchored prefix verifies clean |
 | 5 | rollover · auto-resurrection · 100K soak | **194× zstd**, cold replay via real CLI · **351,888 req, 0 failures** over 2 kill -9 · **106,007 ops**, 120 rotations, index == disk |
 | 6 | cold tier · bit-rot heal · canary update | 10 PUTs + tiered eviction with crash pinning + byte-exact S3 restore · 3 heal rounds, digest-verified · tamper 30 ms reject, broken candidate auto-rollback |
 | 7 | shield · TLS · demo | **5/5 burst + 5× 429 + Retry-After**, 6 scanner paths 404'd, **0 frames recorded** for attacks, <50 µs rejections · self-signed boot + **hot reload, 12 req 0 failures** + garbage-cert resilience · `demo --once` exit 0, **4 engines in 3.1 s** |
 
-**Budgets:** binary **16.9 MB** (red line < 21 MB, final audit < 35 MB) ·
-idle RSS ≈ 18 MB · load RSS 33.1 MB (< 35 MB) · 183 workspace tests green in
+**Budgets:** binary **17.1 MB** (red line < 21 MB, final audit < 35 MB) ·
+idle RSS ≈ 18 MB · load RSS 33.1 MB (< 35 MB) · 201 workspace tests green in
 release.
 
 ## Building from source
@@ -335,8 +388,8 @@ release.
 ```bash
 cargo build --release --bin blackbox     # Rust stable, no C toolchain needed
 ls -la target/release/blackbox
-cargo test --release --workspace         # 183 tests
-./target/release/blackbox demo --once    # 19-gate smoke in one command
+cargo test --release --workspace         # 201 tests
+./target/release/blackbox demo --once    # 21-gate smoke in one command
 ```
 
 The workspace is eight crates: `blackbox-core` (frames/schema/compactor/

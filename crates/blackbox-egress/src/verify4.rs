@@ -22,13 +22,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 
-type LegacyClient = Client<HttpConnector, Full<Bytes>>;
+pub(crate) type LegacyClient = Client<HttpConnector, Full<Bytes>>;
 
-fn client() -> LegacyClient {
+pub(crate) fn client() -> LegacyClient {
     Client::builder(TokioExecutor::new()).build_http()
 }
 
-async fn send(
+pub(crate) async fn send(
     client: &LegacyClient,
     method: &str,
     url: &str,
@@ -49,7 +49,7 @@ async fn send(
     Ok((status, hdrs, bytes))
 }
 
-fn tmpdir(tag: &str) -> std::path::PathBuf {
+pub(crate) fn tmpdir(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!(
         "bb4-{tag}-{}-{}",
         std::process::id(),
@@ -73,7 +73,7 @@ struct MockState {
 /// `usage` (12 prompt + 34 completion) and `x-api-cost-micros: 750`, and
 /// echo the caller's Authorization into the content (cross-tenant marker).
 /// Returns the bind address plus the live hit counter.
-async fn spawn_mock_openai(
+pub(crate) async fn spawn_mock_openai(
     latency_ms: u64,
     poison_first: bool,
 ) -> (std::net::SocketAddr, Arc<AtomicU64>) {

@@ -17,6 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 /// One cached upstream response (shared refcounted body).
+/// Clone is cheap (Bytes/Vec of owned strs); near-cache registrations share
+/// the same entry as the L0 store.
+#[derive(Clone)]
 pub struct CachedEntry {
     pub status: u16,
     /// Filtered headers (hop-by-hop + content-length stripped).

@@ -187,6 +187,16 @@ pub(crate) async fn handle_durable(
         }
     };
 
+    blackbox_core::audit::record(
+        "queue",
+        "enqueue",
+        &trace_hex,
+        &format!(
+            "queue={} job={} dedup={}",
+            queue, outcome.job_id, outcome.deduplicated
+        ),
+    );
+
     // --- Telemetry copy: SCRUBBED (this is the ONLY scrubbed copy) ---
     emit_telemetry_records(ctx, durable, &queue, &trace_id, &method, &url_path, &raw_headers, &raw_body, 202);
 
