@@ -587,6 +587,9 @@ async fn main() -> Result<()> {
             let sig = selfupdate::sign_bytes(&sk, &bytes);
             std::fs::write(&out, sig).with_context(|| format!("write {}", out.display()))?;
             println!("signed {} → {} (128-hex Ed25519 over SHA-256)", input.display(), out.display());
+            // Release CI signs with a secret seed and publishes this line as the
+            // public verifying key operators can pin for `blackbox self-update`.
+            println!("verifying-key: {}", crate::phase6::hex_of(&sk.verifying_key().to_bytes()));
         }
         Cmd::SelfTest {
             canary_port,

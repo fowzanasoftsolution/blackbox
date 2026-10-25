@@ -1,0 +1,222 @@
+# Blackbox Signed Release — tag `v*` (or run manually) to build stripped
+# release binaries, checksum them, optionally Ed25519-sign them (via the
+# binary's own `blackbox sign-update`), and publish everything to GitHub
+# Releases. x86_64 is the mandatory gate; aarch64 is best-effort cross
+# (a failed cross build never blocks the x86_64 release).
+#
+# Signing: if the `BLACKBOX_SIGNING_KEY` repo secret holds a 64-hex Ed25519
+# seed, every shipped binary is signed (128-hex sig over SHA-256) and the
+# matching verifying key is published in the release notes + inside each
+# tarball as `blackbox.pub`. Operators pin it for `blackbox self-update`:
+#   export BLACKBOX_UPDATE_PUBKEY=$(tar -xOzf blackbox-x86_64-linux.tar.gz blackbox.pub)
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (defaults to v0.0.0-dev-<run>)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------- x86_64 --
+  build-x86_64:
+    name: build x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+
+      - name: Build (release)
+        run: cargo build --release -p blackbox
+
+      - name: Strip
+        run: strip target/release/blackbox
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+          mkdir pack
+          cp target/release/blackbox pack/
+          tar -czf blackbox-x86_64-linux.tar.gz -C pack blackbox
+          sha256sum blackbox-x86_64-linux.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-x86_64
+          path: blackbox-x86_64-linux.tar.gz
+          if-no-files-found: error
+
+  # --------------------------------------------------------------- aarch64 --
+  build-aarch64:
+    name: build aarch64-unknown-linux-gnu (cross, best-effort)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build (release, stripped via rustc)
+        run: cross build --release -p blackbox --target aarch64-unknown-linux-gnu
+        env:
+          RUSTFLAGS: -C strip=symbols
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+          mkdir pack
+          cp target/aarch64-unknown-linux-gnu/release/blackbox pack/
+          tar -czf blackbox-aarch64-linux.tar.gz -C pack blackbox
+          sha256sum blackbox-aarch64-linux.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-aarch64
+          path: blackbox-aarch64-linux.tar.gz
+          if-no-files-found: error
+
+  # --------------------------------------------------------------- release --
+  release:
+    name: sign + publish GitHub Release
+    needs: [build-x86_64, build-aarch64]
+    if: ${{ always() && needs.build-x86_64.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      BLACKBOX_SIGNING_KEY: ${{ secrets.BLACKBOX_SIGNING_KEY }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Resolve release tag
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+            [ -n "$TAG" ] || TAG="v0.0.0-dev-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          case "$TAG" in v*) ;; *) echo "tag must start with v: $TAG" >&2; exit 1 ;; esac
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Unpack, sign, repack, checksum
+        run: |
+          set -euo pipefail
+          mkdir -p ship work
+          tar -xzf dist/bin-x86_64/blackbox-x86_64-linux.tar.gz -C work
+          mv work/blackbox blackbox-x86_64
+          if [ -f dist/bin-aarch64/blackbox-aarch64-linux.tar.gz ]; then
+            tar -xzf dist/bin-aarch64/blackbox-aarch64-linux.tar.gz -C work
+            mv work/blackbox blackbox-aarch64
+          else
+            echo "aarch64 cross build did not publish an artifact — shipping x86_64 only"
+          fi
+
+          # Sign with the project's own Ed25519 updater key format
+          # (sign-update = 128-hex sig over SHA-256; also prints the
+          # verifying key so it can be published for self-update pinning).
+          if [ -n "${BLACKBOX_SIGNING_KEY:-}" ]; then
+            KEYF="${RUNNER_TEMP}/blackbox_signing.key"
+            printf '%s' "${BLACKBOX_SIGNING_KEY}" > "${KEYF}"
+            chmod 600 "${KEYF}"
+            for f in blackbox-x86_64 blackbox-aarch64; do
+              [ -f "$f" ] || continue
+              OUT="$(./blackbox-x86_64 sign-update --key "@${KEYF}" --in "$f" --out "$f.sig")"
+              echo "$OUT" | sed -n 's/^verifying-key: //p' > "$f.pub"
+              echo "signed $f"
+            done
+            rm -f "${KEYF}"
+          else
+            echo "BLACKBOX_SIGNING_KEY not set — publishing unsigned binaries"
+          fi
+
+          for f in blackbox-x86_64 blackbox-aarch64; do
+            [ -f "$f" ] || continue
+            rm -rf stage && mkdir stage
+            cp "$f" stage/blackbox
+            [ -s "$f.sig" ] && cp "$f.sig" stage/blackbox.sig
+            [ -s "$f.pub" ] && cp "$f.pub" stage/blackbox.pub
+            ( cd stage && tar -czf "../ship/blackbox-${f#blackbox-}-linux.tar.gz" * )
+          done
+
+          cd ship
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Release notes
+        run: |
+          set -euo pipefail
+          {
+            echo "## Blackbox ${RELEASE_TAG}"
+            echo
+            echo "Single static-minded <21 MB binary — ingress shield + TLS, durable queue, egress FinOps proxy, self-healing cold tier."
+            echo
+            echo '| Asset | Target |'
+            echo '|---|---|'
+            echo '| `blackbox-x86_64-linux.tar.gz` | x86_64 linux (glibc 2.31+) |'
+            if [ -f ship/blackbox-aarch64-linux.tar.gz ]; then
+              echo '| `blackbox-aarch64-linux.tar.gz` | aarch64 linux |'
+            fi
+            echo
+            echo 'Install:'
+            echo '```sh'
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh | sh"
+            echo '```'
+            echo
+            echo 'Verify checksums: `sha256sum -c SHA256SUMS`'
+            if ls ship/blackbox-*.pub >/dev/null 2>&1; then
+              echo
+              echo 'Ed25519 verifying key (pin for `blackbox self-update`):'
+              echo '```'
+              for p in ship/blackbox-*.pub; do
+                echo "$(basename "$p"): $(cat "$p")"
+              done
+              echo '```'
+            else
+              echo
+              echo '> Unsigned build — add the `BLACKBOX_SIGNING_KEY` repo secret (64-hex Ed25519 seed) to enable update signing.'
+            fi
+            echo
+            echo "Commit: ${GITHUB_SHA}"
+          } > notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ARGS=(--title "Blackbox ${RELEASE_TAG}" --notes-file notes.md)
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            ARGS+=(--target "${GITHUB_SHA}")
+          fi
+          case "${RELEASE_TAG}" in
+            *-dev-*) ARGS+=(--prerelease) ;;
+          esac
+          gh release create "${RELEASE_TAG}" "${ARGS[@]}" ship/*

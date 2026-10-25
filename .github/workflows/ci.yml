@@ -1,0 +1,45 @@
+# Blackbox CI — every push/PR must build clean, pass the full workspace
+# test suite in release mode, and survive the end-to-end integration gate:
+# `blackbox demo --once` boots the real 4-engine node (ingress shield+TLS,
+# queue leases, egress singleflight, cold tier) and runs the 5-act scenario
+# headlessly. If it exits 0, the binary is releasable.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (release) + demo gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+
+      - name: Build (release)
+        run: cargo build --workspace --release
+
+      - name: Test (release)
+        run: cargo test --workspace --release
+
+      - name: End-to-end integration gate (blackbox demo --once)
+        run: ./target/release/blackbox demo --once
