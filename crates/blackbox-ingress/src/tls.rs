@@ -4,8 +4,9 @@
 //! cert.pem --tls-key key.pem` (or `--tls-self-signed` for instant local /
 //! staging HTTPS) terminates TLS right on the reverse-proxy port.
 //!
-//! Hot reload: a 2 s poller watches cert + key mtimes; on change the PEMs
-//! are re-parsed and the new `rustls::ServerConfig` is published on a
+//! Hot reload: a 2 s poller fingerprints the cert + key PEM contents; on
+//! change (not mtime — several container filesystems keep mtimes stale) the
+//! PEMs are re-parsed and the new `rustls::ServerConfig` is published on a
 //! `watch` channel. Existing connections keep serving on the old config
 //! (their handshake already completed); every NEW connection picks up the
 //! new certificate — zero downtime, zero dropped requests.
@@ -164,35 +165,48 @@ fn local_ipv4() -> Option<std::net::IpAddr> {
     Some(s.local_addr().ok()?.ip())
 }
 
-/// Spawn the 2 s mtime poller that swaps the live ServerConfig when the
-/// cert/key files change. Only meaningful for `from_files` states.
+/// Spawn the 2 s poller that swaps the live ServerConfig when the
+/// cert/key PEM contents change. Only meaningful for `from_files` states.
+///
+/// Change detection is CONTENT-KEYED (SHA-256 over the actual PEM bytes),
+/// not mtime-keyed: on several container filesystems (containerd overlay
+/// stores, gRPC-FUSE/9p host binds) file mtimes are quantized and can stay
+/// stale after a rotation write — an mtime comparison would then never
+/// trigger the reload. Reading a few KB every 2 s on a $5 VPS is free, and
+/// a content fingerprint is immune to timestamp granularity.
 pub fn spawn_hot_reload(state: Arc<TlsState>) {
     let Some((cert_path, key_path)) = state.watch_paths().map(|(c, k)| (c.clone(), k.clone())) else {
         return;
     };
-    // last-seen mtimes; None forces an initial baseline (no reload).
-    let mut last: Option<(std::time::SystemTime, std::time::SystemTime)> = None;
+    // Last-accepted pair fingerprint; None forces the initial baseline.
+    let mut last_hash: Option<[u8; 32]> = None;
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
-            let (Ok(cm), Ok(km)) = (
-                tokio::fs::metadata(&cert_path).await,
-                tokio::fs::metadata(&key_path).await,
+            // Read OUTSIDE the swap: mid-rotation failures keep serving the
+            // old cert (the byte reads, not the stat calls, fail during a
+            // torn overwrite).
+            let (Ok(cert_bytes), Ok(key_bytes)) = (
+                tokio::fs::read(&cert_path).await,
+                tokio::fs::read(&key_path).await,
             ) else {
                 continue; // mid-rotation or removed: keep serving the old cert
             };
-            let (Ok(cm), Ok(km)) = (cm.modified(), km.modified()) else {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&(cert_bytes.len() as u64).to_le_bytes());
+            hasher.update(&cert_bytes);
+            hasher.update(&(key_bytes.len() as u64).to_le_bytes());
+            hasher.update(&key_bytes);
+            let hash: [u8; 32] = hasher.finalize().into();
+            if Some(hash) == last_hash {
                 continue;
-            };
-            if let Some((lc, lk)) = &last {
-                if *lc == cm && *lk == km {
-                    continue;
-                }
             }
-            // Load OUTSIDE the swap: a bad replacement never disrupts
-            // serving — the old config stays live and we log the failure.
+            // Parse only when the bytes actually changed: a bad replacement
+            // never disrupts serving — the old config stays live and we log
+            // the failure.
             match (load_certs(&cert_path), load_key(&key_path)) {
                 (Ok(certs), Ok(key)) => match build_config(certs, key) {
                     Ok(cfg) => {
@@ -203,7 +217,7 @@ pub fn spawn_hot_reload(state: Arc<TlsState>) {
                 },
                 (Err(e), _) | (_, Err(e)) => tracing::warn!("tls: hot-reload skipped (unreadable): {e}"),
             }
-            last = Some((cm, km));
+            last_hash = Some(hash);
         }
     });
 }

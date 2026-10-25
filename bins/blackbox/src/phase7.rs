@@ -380,9 +380,9 @@ pub async fn gate2() -> Result<()> {
     assert_eq!(served_a, der_a, "boot served the on-disk cert A");
     println!("  cert A served on boot ({} bytes leaf)", served_a.len());
 
-    // Let the poller establish its mtime baseline (first tick is
-    // immediate; a rotation written before it would be swallowed into
-    // the baseline swap).
+    // Let the poller establish its content-fingerprint baseline (first
+    // tick is immediate; a rotation written before it would be swallowed
+    // into the baseline swap).
     tokio::time::sleep(Duration::from_millis(2_500)).await;
 
     // Rotate ON DISK (the classic certbot flow — no signal, no restart).
