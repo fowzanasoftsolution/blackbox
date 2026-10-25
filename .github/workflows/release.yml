@@ -9,6 +9,11 @@
 # matching verifying key is published in the release notes + inside each
 # tarball as `blackbox.pub`. Operators pin it for `blackbox self-update`:
 #   export BLACKBOX_UPDATE_PUBKEY=$(tar -xOzf blackbox-x86_64-linux.tar.gz blackbox.pub)
+#
+# Re-runs are idempotent: an existing release for the tag is deleted and
+# re-published (the git tag is kept), so adding the BLACKBOX_SIGNING_KEY
+# secret after a first unsigned run just needs the job re-run (or a
+# workflow_dispatch with the tag name) to ship signed artifacts.
 name: Release
 
 on:
@@ -219,4 +224,11 @@ jobs:
           case "${RELEASE_TAG}" in
             *-dev-*) ARGS+=(--prerelease) ;;
           esac
+          # Idempotent publish: a re-run (e.g. BLACKBOX_SIGNING_KEY added after
+          # the first run shipped unsigned) must REPLACE the release + assets,
+          # not die on "already exists". `gh release delete` keeps the git tag.
+          if gh release view "${RELEASE_TAG}" > /dev/null 2>&1; then
+            echo "release ${RELEASE_TAG} already exists — replacing release object + assets"
+            gh release delete "${RELEASE_TAG}" --yes
+          fi
           gh release create "${RELEASE_TAG}" "${ARGS[@]}" ship/*
