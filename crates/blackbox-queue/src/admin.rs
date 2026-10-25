@@ -113,6 +113,34 @@ pub fn queue_breakdown(db_path: &Path) -> Result<Vec<(String, u64, u64, u64)>, S
         .collect())
 }
 
+/// LIVE-server detection for concurrent replay (v1.0.3): `true` when any
+/// `*.redb` database at the data-dir root is locked by another process —
+/// i.e. a running `blackbox serve` / `blackbox run` node holds its writer
+/// lock (`redb::DatabaseError::DatabaseAlreadyOpen`).
+///
+/// The probe only opens files that already exist (it never creates one) and
+/// the acquired lock is dropped again immediately — a writers' live state is
+/// left alone (opening a redb file does not mutate content).
+pub fn data_dir_locked(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false; // nothing to probe yet
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("redb") || !path.is_file() {
+            continue;
+        }
+        match redb::Database::open(&path) {
+            // We held the exclusive lock for a moment — no contention.
+            Ok(_db) => {}
+            Err(redb::DatabaseError::DatabaseAlreadyOpen) => return true,
+            // Corruption/other open errors are NOT a liveness signal.
+            Err(_) => {}
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

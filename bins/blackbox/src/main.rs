@@ -196,6 +196,10 @@ enum Cmd {
         /// Egress mock interceptor bind.
         #[arg(long, default_value = "127.0.0.1:0")]
         egress: String,
+        /// Force an isolated scratch copy of the data dir (also happens
+        /// automatically when a live serve/run node holds the redb locks).
+        #[arg(long, default_value_t = false)]
+        data_copy: bool,
     },
     /// Durable queue administration (run while `serve` is stopped).
     Queue {
@@ -498,8 +502,9 @@ async fn main() -> Result<()> {
             data,
             listen,
             egress,
+            data_copy,
         } => {
-            phase3::replay(trace_id, target, data, listen, egress).await?;
+            phase3::replay(trace_id, target, data, listen, egress, data_copy).await?;
         }
         Cmd::Queue { mode } => match mode {
             QueueMode::Status { data } => phase3::queue_status(data).await?,

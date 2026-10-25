@@ -21,8 +21,8 @@ changes.
                                  your app (any language)      S3 / R2 cold tier
 ```
 
-**v1.2 status — all seven phases complete.** 165 workspace tests green in
-release, **19/19 verification gates passing**, binary **15.9 MB**, load RSS
+**v1.2 status — all seven phases complete.** 183 workspace tests green in
+release, **19/19 verification gates passing**, binary **16.9 MB**, load RSS
 **33 MB** (48 MB budget). Phase 7 adds the launch polish: a lock-free request
 shield, native TLS with zero-downtime cert reload, and a one-command demo.
 
@@ -193,7 +193,12 @@ Lock it down with `BLACKBOX_ADMIN_TOKEN` (sent as `x-admin-token`).
 blackbox run          wrap + supervise any app (injects the 5 env vars)
 blackbox serve        full node against an already-running upstream
 blackbox demo         self-contained 4-engine demo (--once for CI)
-blackbox replay <tid> deterministic time-travel replay against --target
+blackbox replay <tid>  deterministic time-travel replay against --target.
+                       Safe against a LIVE node: the dir is auto-cloned into
+                       a scratch copy when `serve`/`run` holds the redb
+                       locks (or pass --data-copy to force it) — recorded
+                       mocks replay verbatim, unrecorded egress is 428-blocked,
+                       the live node is never touched
 blackbox queue status|retry-dlq      offline queue administration
 blackbox self-update  Ed25519-verified canary update (auto-rollback)
 blackbox keygen | sign-update        update signing tooling
@@ -321,8 +326,8 @@ CMD ["blackbox", "run", "--listen", "0.0.0.0:8080", "--data", "/data", "--", "/s
 | 6 | cold tier · bit-rot heal · canary update | 10 PUTs + tiered eviction with crash pinning + byte-exact S3 restore · 3 heal rounds, digest-verified · tamper 30 ms reject, broken candidate auto-rollback |
 | 7 | shield · TLS · demo | **5/5 burst + 5× 429 + Retry-After**, 6 scanner paths 404'd, **0 frames recorded** for attacks, <50 µs rejections · self-signed boot + **hot reload, 12 req 0 failures** + garbage-cert resilience · `demo --once` exit 0, **4 engines in 3.1 s** |
 
-**Budgets:** binary **15.9 MB** (red line < 21 MB, final audit < 35 MB) ·
-idle RSS ≈ 18 MB · load RSS 33.1 MB (< 35 MB) · 165 workspace tests green in
+**Budgets:** binary **16.9 MB** (red line < 21 MB, final audit < 35 MB) ·
+idle RSS ≈ 18 MB · load RSS 33.1 MB (< 35 MB) · 183 workspace tests green in
 release.
 
 ## Building from source
@@ -330,7 +335,7 @@ release.
 ```bash
 cargo build --release --bin blackbox     # Rust stable, no C toolchain needed
 ls -la target/release/blackbox
-cargo test --release --workspace         # 165 tests
+cargo test --release --workspace         # 183 tests
 ./target/release/blackbox demo --once    # 19-gate smoke in one command
 ```
 

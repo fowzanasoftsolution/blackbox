@@ -99,19 +99,53 @@ pub async fn serve(
 }
 
 /// `blackbox replay <trace_id> --target <url>` — deterministic sandbox.
+///
+/// v1.0.3 concurrent-replay hardening: this runs WHILE `blackbox serve` /
+/// `blackbox run` is live and holding the redb locks, because the developer
+/// is single-terminal. When the data dir is locked by a live node (probe:
+/// `DatabaseAlreadyOpen` on any `*.redb`) — or whenever `--data-copy` is
+/// passed — the whole dir is cloned into an ephemeral scratch copy:
+/// immutable cold artifacts (`.zst` / `.idx`) are HARDLINKED, everything the
+/// replay may mutate (the active `.log` segments, every `*.redb`) is really
+/// copied, and every replay-side touch (cold-tier restore for FIFO-evicted
+/// traces, the replay proxy's own segment recording) happens in that scratch
+/// dir. The live node is never written and is never asked for the lock.
 pub async fn replay(
     trace_hex: String,
     target: String,
     data: PathBuf,
     listen: String,
     egress: String,
+    data_copy: bool,
 ) -> Result<()> {
     let trace_id = blackbox_core::schema::parse_trace_hex(trace_hex.trim())
         .context("trace id must be 32 hex chars")?;
 
+    let locked = !data_copy && blackbox_queue::admin::data_dir_locked(&data);
+    let data = if data_copy || locked {
+        let scratch = copy_data_dir_scratch(&data)
+            .context("data-copy: cloning the data dir for an isolated replay")?;
+        let why = if locked {
+            "live node redb lock detected — automatic fallback"
+        } else {
+            "--data-copy requested"
+        };
+        println!(
+            "data-copy: cloned {} -> {} ({})",
+            data.display(),
+            scratch.display(),
+            why
+        );
+        println!("  (replay-side heals/records go here — delete any time)");
+        scratch
+    } else {
+        data
+    };
+
     // Phase 6: when the cold tier is configured, transparently restore the
     // trace's segment if it was FIFO-evicted (or bit-rotted) BEFORE loading
-    // the replay engine — time-travel replay reads through S3/R2.
+    // the replay engine — time-travel replay reads through S3/R2. With the
+    // scratch copy in place this heals the SCRATCH dir only.
     if let Some(cfg) = blackbox_cold::S3Config::from_env() {
         if let Ok(cold) = blackbox_cold::ColdTier::open(cfg, &data) {
             match cold.restore_trace(&data, &trace_id) {
@@ -170,6 +204,59 @@ pub async fn replay(
     println!("  Ctrl-C to stop");
     std::future::pending::<()>().await;
     Ok(())
+}
+
+/// Ephemeral scratch clone of a data dir for isolated replay.
+///
+/// File classification:
+/// * `.zst` / `.idx` — sealed, immutable cold artifacts → HARDLINK (unix;
+///   versions of this path copy when a hardlink is unavailable, e.g. across
+///   filesystems). A later cold-tier heal REPLACES such a file via atomic
+///   rename, breaking the link — never the live node's inode.
+/// * `.log` — the active append-only segment: real copy. The replay proxy's
+///   own recording appends here (and may rotate) without touching the live
+///   file's offsets.
+/// * `.redb` — snapshot state (`jobs`, `finops`, `cold`): real copy. redb's
+///   on-disk format recovers to the last valid commit on open, so a copy
+///   taken while the node commits concurrently stays loadable.
+/// * everything else (`tls/`, `update.pub`, `.sig`, subdirs) is not needed
+///   by the replay path and is skipped.
+pub fn copy_data_dir_scratch(src: &PathBuf) -> Result<PathBuf> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dst = std::env::temp_dir().join(format!("blackbox-replay-{}-{nanos:x}", std::process::id()));
+    std::fs::create_dir_all(&dst)
+        .with_context(|| format!("create scratch dir {}", dst.display()))?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
+        let entry = entry.context("data-copy: read entry")?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue; // `tls/`, `…/parts` etc. — replay never needs them
+        }
+        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("");
+        let dst_path = dst.join(entry.file_name());
+        match ext {
+            "zst" | "idx" => {
+                // Sealed artifacts: hardlink so a later cold-tier heal's
+                // atomic rename breaks the link instead of the live inode
+                // (falls back to a real copy — e.g. across filesystems).
+                if std::fs::hard_link(&path, &dst_path).is_err() {
+                    std::fs::copy(&path, &dst_path).with_context(|| {
+                        format!("data-copy: copy {} -> {}", path.display(), dst_path.display())
+                    })?;
+                }
+            }
+            "log" | "redb" => {
+                std::fs::copy(&path, &dst_path).with_context(|| {
+                    format!("data-copy: copy {} -> {}", path.display(), dst_path.display())
+                })?;
+            }
+            _ => {} // update.pub, *.sig, metadata relics — replay does not read them
+        }
+    }
+    Ok(dst)
 }
 
 /// `blackbox queue status` — offline redb inspection.
