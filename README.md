@@ -461,6 +461,15 @@ every sealed segment; both injected app crashes recovered health-verified
 verdict **20/20 PASS**; full raw evidence, manifests and hashes live in the
 dated soak report directory outside this repository.
 
+![Node RSS timeline — run-1 vs re-verification run](docs/soak/rss-timeline.svg)
+
+![Run-1 vs re-verification comparison](docs/soak/soak-comparison.svg)
+
+The charts are regenerated deterministically from the raw evidence by
+`scripts/soak/soak-graphs.py` (pure stdlib, no chart dependencies); the full
+comparison narrative lives in
+[`docs/soak/V1.1.2-COMPARISON.md`](docs/soak/V1.1.2-COMPARISON.md).
+
 ## Repository layout
 
 A Cargo workspace of eight crates (uniform `crates/*`, one binary crate):

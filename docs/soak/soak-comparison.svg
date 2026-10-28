@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="430" viewBox="0 0 1000 430" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<title>v1.1.2 soak - run-1 vs re-verification comparison</title>
+<rect width="1000" height="430" fill="white"/>
+<text x="20.0" y="30.0" font-size="17" fill="#111" text-anchor="start" font-weight="bold" font-style="normal">v1.1.2 soak - run-1 (2026-10-27) vs re-verification run (2026-10-28)</text>
+<text x="20.0" y="50.0" font-size="11" fill="#666" text-anchor="start" font-weight="normal" font-style="normal">Peak kernel VmRSS per node, records sampled out by the Shed85 finalizer, soak checks passed (of 20)</text>
+<text x="50.0" y="76.0" font-size="13" fill="#111" text-anchor="start" font-weight="bold" font-style="normal">Peak RSS (MiB)</text>
+<line x1="96.0" y1="340.0" x2="330.00" y2="340.0" stroke="#e8e8e8" stroke-width="1"/>
+<text x="90.0" y="344.0" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">0</text>
+<line x1="96.0" y1="290.0" x2="330.00" y2="290.0" stroke="#e8e8e8" stroke-width="1"/>
+<text x="90.0" y="294.0" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">10</text>
+<line x1="96.0" y1="240.0" x2="330.00" y2="240.0" stroke="#e8e8e8" stroke-width="1"/>
+<text x="90.0" y="244.0" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">20</text>
+<line x1="96.0" y1="190.0" x2="330.00" y2="190.0" stroke="#e8e8e8" stroke-width="1"/>
+<text x="90.0" y="194.0" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">30</text>
+<line x1="96.0" y1="140.0" x2="330.00" y2="140.0" stroke="#e8e8e8" stroke-width="1"/>
+<text x="90.0" y="144.0" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">40</text>
+<line x1="96.0" y1="90.0" x2="330.00" y2="90.0" stroke="#e8e8e8" stroke-width="1"/>
+<text x="90.0" y="94.0" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">50</text>
+<line x1="96.0" y1="115.0" x2="330.00" y2="115.0" stroke="#7f8c8d" stroke-width="1.3" stroke-dasharray="2 3"/>
+<text x="328.0" y="110.0" font-size="9.5" fill="#7f8c8d" text-anchor="end" font-weight="normal" font-style="normal">target 45</text>
+<line x1="96.0" y1="100.0" x2="330.00" y2="100.0" stroke="#c0392b" stroke-width="1.3"/>
+<text x="328.0" y="95.0" font-size="9.5" fill="#c0392b" text-anchor="end" font-weight="normal" font-style="normal">budget 48</text>
+<line x1="96.0" y1="340.0" x2="330.00" y2="340.0" stroke="#555" stroke-width="1.2"/>
+<rect x="98.0" y="156.6" width="44" height="183.4" fill="#d9534f" opacity="0.85"/>
+<text x="120.0" y="150.6" font-size="11.5" fill="#222" text-anchor="middle" font-weight="bold" font-style="normal">36.67</text>
+<text x="120.0" y="355.0" font-size="10.5" fill="#555" text-anchor="middle" font-weight="normal" font-style="normal">A</text>
+<rect x="160.0" y="180.0" width="44" height="160.0" fill="#2e9e44" opacity="0.85"/>
+<text x="182.0" y="174.0" font-size="11.5" fill="#222" text-anchor="middle" font-weight="bold" font-style="normal">32</text>
+<text x="182.0" y="355.0" font-size="10.5" fill="#555" text-anchor="middle" font-weight="normal" font-style="normal">A</text>
+<rect x="222.0" y="182.8" width="44" height="157.2" fill="#d9534f" opacity="0.85"/>
+<text x="244.0" y="176.8" font-size="11.5" fill="#222" text-anchor="middle" font-weight="bold" font-style="normal">31.44</text>
+<text x="244.0" y="355.0" font-size="10.5" fill="#555" text-anchor="middle" font-weight="normal" font-style="normal">B</text>
+<rect x="284.0" y="198.8" width="44" height="141.2" fill="#2e9e44" opacity="0.85"/>
+<text x="306.0" y="192.8" font-size="11.5" fill="#222" text-anchor="middle" font-weight="bold" font-style="normal">28.23</text>
+<text x="306.0" y="355.0" font-size="10.5" fill="#555" text-anchor="middle" font-weight="normal" font-style="normal">B</text>
+<text x="370.0" y="76.0" font-size="13" fill="#111" text-anchor="start" font-weight="bold" font-style="normal">Records sampled out</text>
+<line x1="416.0" y1="340.0" x2="650.00" y2="340.0" stroke="#e8e8e8" stroke-width="1"/>
+<text x="410.0" y="344.0" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">0</text>
+<line x1="416.0" y1="277.5" x2="650.00" y2="277.5" stroke="#e8e8e8" stroke-width="1"/>
+<text x="410.0" y="281.5" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">2</text>
+<line x1="416.0" y1="215.0" x2="650.00" y2="215.0" stroke="#e8e8e8" stroke-width="1"/>
+<text x="410.0" y="219.0" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">4</text>
+<line x1="416.0" y1="152.5" x2="650.00" y2="152.5" stroke="#e8e8e8" stroke-width="1"/>
+<text x="410.0" y="156.5" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">6</text>
+<line x1="416.0" y1="90.0" x2="650.00" y2="90.0" stroke="#e8e8e8" stroke-width="1"/>
+<text x="410.0" y="94.0" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">8</text>
+<line x1="416.0" y1="340.0" x2="650.00" y2="340.0" stroke="#555" stroke-width="1.2"/>
+<rect x="418.0" y="121.2" width="44" height="218.8" fill="#d9534f" opacity="0.85"/>
+<text x="440.0" y="115.2" font-size="11.5" fill="#222" text-anchor="middle" font-weight="bold" font-style="normal">7</text>
+<text x="440.0" y="355.0" font-size="10.5" fill="#555" text-anchor="middle" font-weight="normal" font-style="normal">A</text>
+<rect x="480.0" y="340.0" width="44" height="1.0" fill="#2e9e44" opacity="0.85"/>
+<text x="502.0" y="334.0" font-size="11.5" fill="#222" text-anchor="middle" font-weight="bold" font-style="normal">0</text>
+<text x="502.0" y="355.0" font-size="10.5" fill="#555" text-anchor="middle" font-weight="normal" font-style="normal">A</text>
+<rect x="542.0" y="340.0" width="44" height="1.0" fill="#d9534f" opacity="0.85"/>
+<text x="564.0" y="334.0" font-size="11.5" fill="#222" text-anchor="middle" font-weight="bold" font-style="normal">0</text>
+<text x="564.0" y="355.0" font-size="10.5" fill="#555" text-anchor="middle" font-weight="normal" font-style="normal">B</text>
+<rect x="604.0" y="340.0" width="44" height="1.0" fill="#2e9e44" opacity="0.85"/>
+<text x="626.0" y="334.0" font-size="11.5" fill="#222" text-anchor="middle" font-weight="bold" font-style="normal">0</text>
+<text x="626.0" y="355.0" font-size="10.5" fill="#555" text-anchor="middle" font-weight="normal" font-style="normal">B</text>
+<text x="690.0" y="76.0" font-size="13" fill="#111" text-anchor="start" font-weight="bold" font-style="normal">Checks passed (of 20)</text>
+<line x1="736.0" y1="340.0" x2="970.00" y2="340.0" stroke="#e8e8e8" stroke-width="1"/>
+<text x="730.0" y="344.0" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">0</text>
+<line x1="736.0" y1="215.0" x2="970.00" y2="215.0" stroke="#e8e8e8" stroke-width="1"/>
+<text x="730.0" y="219.0" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">10</text>
+<line x1="736.0" y1="90.0" x2="970.00" y2="90.0" stroke="#e8e8e8" stroke-width="1"/>
+<text x="730.0" y="94.0" font-size="10" fill="#888" text-anchor="end" font-weight="normal" font-style="normal">20</text>
+<line x1="736.0" y1="340.0" x2="970.00" y2="340.0" stroke="#555" stroke-width="1.2"/>
+<rect x="800.0" y="102.5" width="44" height="237.5" fill="#d9534f" opacity="0.85"/>
+<text x="822.0" y="96.5" font-size="11.5" fill="#222" text-anchor="middle" font-weight="bold" font-style="normal">19</text>
+<text x="822.0" y="355.0" font-size="10.5" fill="#555" text-anchor="middle" font-weight="normal" font-style="normal">run-1</text>
+<rect x="862.0" y="90.0" width="44" height="250.0" fill="#2e9e44" opacity="0.85"/>
+<text x="884.0" y="84.0" font-size="11.5" fill="#222" text-anchor="middle" font-weight="bold" font-style="normal">20</text>
+<text x="884.0" y="355.0" font-size="10.5" fill="#555" text-anchor="middle" font-weight="normal" font-style="normal">re-run</text>
+<rect x="50" y="395" width="14" height="10" fill="#d9534f" opacity="0.85"/>
+<text x="70.0" y="404.0" font-size="11" fill="#333" text-anchor="start" font-weight="normal" font-style="normal">run-1 (FAIL 19/20, 7 sampled out)</text>
+<rect x="480" y="395" width="14" height="10" fill="#2e9e44" opacity="0.85"/>
+<text x="500.0" y="404.0" font-size="11" fill="#333" text-anchor="start" font-weight="normal" font-style="normal">re-run (PASS 20/20, 0 sampled out)</text>
+<text x="20.0" y="422.0" font-size="9.5" fill="#999" text-anchor="start" font-weight="normal" font-style="normal">Generated by scripts/soak/soak-graphs.py from raw soak evidence; A = blackbox run, B = blackbox serve.</text>
+</svg>
