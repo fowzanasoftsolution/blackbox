@@ -685,51 +685,48 @@ pub async fn run_demo(args: DemoArgs) -> Result<i32> {
 
     // ---- Phase E: bit-rot corruption → automatic self-heal. ------------
     print!("  {} bit-rot self-heal … ", cyan("E"));
-    // Wait for the janitor to seal + zstd + sync at least one segment.
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let cs = cold.stats();
-        stats.cold_uploads = cs.uploads;
-        if cold.synced_segment_count() >= 1 && Instant::now() > started + Duration::from_secs(3) {
-            break;
-        }
-        if Instant::now() > deadline {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    anyhow::ensure!(stats.cold_uploads >= 1, "phase E: cold tier got no uploads");
-
-    // Corrupt the OLDEST sealed .zst (flip bytes past the magic).
-    let mut zsts: Vec<std::path::PathBuf> = std::fs::read_dir(&data)
-        .context("list data dir")?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().map(|x| x == "zst").unwrap_or(false))
-        .collect();
-    zsts.sort_by_key(|p| {
-        p.file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.strip_suffix(".log"))
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(u32::MAX)
-    });
-    anyhow::ensure!(!zsts.is_empty(), "phase E: no sealed .zst segment found");
-    {
-        let victim = &zsts[0];
-        let mut bytes = std::fs::read(victim).context("read victim zst")?;
-        anyhow::ensure!(bytes.len() > 80, "phase E: victim too small");
-        for b in &mut bytes[48..80] {
-            *b ^= 0x5A;
-        }
-        std::fs::write(victim, &bytes).context("write corrupted zst")?;
-    }
-
-    // Reading the poisoned trace transparently heals the segment.
     let first_tid = blackbox_core::schema::parse_trace_hex(
         first_trace.as_ref().unwrap_or(&stats.crash_trace_hex),
     )
     .context("parse first trace hex")?;
+
+    // Wait until the first trace's OWN segment is sealed, materialized as a
+    // local `.zst`, AND registered in the cold tier (upload + registry
+    // commit both done) — then corrupt exactly that file. Merely waiting
+    // for "any synced segment" raced the registry commit on fast CI
+    // runners: the corrupt file had no cold metadata yet, so no read path
+    // could reach the self-heal and the gate died with heals=0.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let victim = loop {
+        if Instant::now() > deadline {
+            anyhow::bail!(
+                "phase E: first trace's segment never became locally sealed \
+                 + cold-registered within 30 s"
+            );
+        }
+        let cs = cold.stats();
+        stats.cold_uploads = cs.uploads;
+        if Instant::now() > started + Duration::from_secs(3) {
+            if let Some(seg) = cold.cold_segment_of(&first_tid) {
+                let p = blackbox_cold::tier::local_zst_path(&data, seg);
+                if p.exists() {
+                    break p;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    anyhow::ensure!(stats.cold_uploads >= 1, "phase E: cold tier got no uploads");
+    {
+        let mut bytes = std::fs::read(&victim).context("read victim zst")?;
+        anyhow::ensure!(bytes.len() > 80, "phase E: victim too small");
+        for b in &mut bytes[48..80] {
+            *b ^= 0x5A;
+        }
+        std::fs::write(&victim, &bytes).context("write corrupted zst")?;
+    }
+
+    // Reading the poisoned trace transparently heals the segment.
     let healed_recs = n.proxy.get_trace(&first_tid).unwrap_or_default();
     stats.bitrot_heals = cold.stats().heals;
     anyhow::ensure!(

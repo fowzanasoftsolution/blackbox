@@ -625,8 +625,12 @@ pub fn append_records_from(buf: &[u8], out: &mut Vec<TraceRecord>) -> Result<(),
 /// v1.1.1 trace-index path for sealed-segment lookups. When the segment is
 /// a sealed `.zst`, it is decompressed exactly ONCE per call (a per-frame
 /// `read_record_at` loop would re-decompress per frame); raw segments are
-/// served by preads. Frames failing to decode are logged and skipped,
-/// preserving the caller-level "skip unreadable frames" contract.
+/// served by preads. RAW segments may legitimately carry a torn tail
+/// (kill -9 mid-append), so unreadable frames are logged and skipped
+/// there; a SEALED `.zst` is the product of a completed, fsync'd seal, so
+/// ANY unreadable frame inside it is bit-rot and the call fails with
+/// `StorageError::Corrupt` — the caller triggers the cold-tier
+/// self-heal instead of silently skipping the segment forever.
 pub fn read_records_at(
     dir: &Path,
     segment_id: u32,
@@ -668,7 +672,9 @@ pub fn read_records_at(
         };
         match res {
             Ok(r) => out.push(Some(r)),
-            Err(e) => {
+            Err(e) if zip_buf.is_none() => {
+                // Raw segment: a torn tail is legitimate (kill -9
+                // mid-append) — skip the unreadable frame, keep the batch.
                 tracing::warn!(
                     segment = segment_id,
                     offset,
@@ -676,6 +682,19 @@ pub fn read_records_at(
                     "indexed frame unreadable in batch read; skipping"
                 );
                 out.push(None);
+            }
+            Err(e) => {
+                // Sealed .zst: any unreadable frame is bit-rot, not a torn
+                // tail — surface it so the caller triggers the cold-tier
+                // self-heal (a silent skip would leave a corrupt segment
+                // unhealed forever).
+                tracing::warn!(
+                    segment = segment_id,
+                    offset,
+                    error = %e,
+                    "indexed frame unreadable in sealed segment; surfacing corruption for self-heal"
+                );
+                return Err(e);
             }
         }
     }
@@ -1111,6 +1130,49 @@ mod tests {
             count += 1;
         }
         assert!(count > 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_sealed_zst_read_surfaces_error_for_self_heal() {
+        // The demo phase E contract: reading a bit-rotted SEALED segment
+        // must surface corruption (the caller then triggers the cold-tier
+        // self-heal) — never `Ok` with silently-skipped frames, which left
+        // the corrupt segment unhealed on the v1.1.2 release CI runner.
+        let dir = tmpdir("rotcorrupt");
+        let mut store = SegmentStore::open_with(
+            &dir,
+            SegmentConfig { max_segment_bytes: 64 * 1024, ..Default::default() },
+        )
+        .unwrap();
+
+        // ~24 small frames stay far under the 64 KiB rotation bound, so
+        // every offset provably lives in segment 0.
+        let mut offs = Vec::new();
+        for seq in 0..24u64 {
+            offs.push(store.append(&rec(seq, 64 + seq as usize)).unwrap());
+        }
+        store.sync().unwrap();
+        assert_eq!(store.active_segment_id(), 0, "all frames must be in segment 0");
+        let sealed = store.seal_active(true).unwrap();
+        assert!(sealed.to_string_lossy().ends_with(".log.zst"));
+
+        // Bit-rot: flip bytes well past the zstd frame header (same sites
+        // the demo flips).
+        let mut bytes = std::fs::read(&sealed).unwrap();
+        assert!(bytes.len() > 80, "victim too small: {}", bytes.len());
+        for b in &mut bytes[48..80] {
+            *b ^= 0x5A;
+        }
+        std::fs::write(&sealed, &bytes).unwrap();
+
+        let res = read_records_at(&dir, 0, &offs);
+        assert!(
+            res.is_err(),
+            "corrupt sealed .zst must surface corruption for self-heal, got Ok with {} readable frames",
+            res.as_ref().map(|v| v.iter().filter(|r| r.is_some()).count()).unwrap_or(0)
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

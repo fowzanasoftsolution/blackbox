@@ -196,6 +196,17 @@ fn serve_survives_signal_with_durable_records(tag: &str, sig: i32) {
         "127.0.0.1:0",
         "--data",
         dir.to_str().unwrap(),
+        // This gate verifies the SIGTERM/SIGINT drain (rc=0 + acknowledged
+        // records durable), NOT the Shed85 sampler. With the default 48 MB
+        // budget on a THP=always host (Docker Desktop; several runner
+        // images) the process VmRSS reads past the 40.8 MB Shed85 watermark
+        // while fully idle, and the finalizer legitimately head-samples
+        // away ~99 % of healthy fast 2xx traffic — the gate then flaked as
+        // "0 records durable" with a perfectly-working drain (a lost round
+        // measured sampled_out=8, frames=0 in the admin stats). The demo
+        // node makes the same adjustment (NodeConfig in demo.rs).
+        "--mem-budget-mb",
+        "256",
     ]);
     drain_pipes(&mut server);
     assert!(wait_port(serve_port, Duration::from_secs(15)), "serve up");
@@ -261,6 +272,9 @@ fn run_sigterm_exits_zero() {
         "127.0.0.1:0",
         "--data",
         dir.to_str().unwrap(),
+        // Drain gate, not sampler gate — see the serve leg's note.
+        "--mem-budget-mb",
+        "256",
         "--",
         BIN,
         "env-child",
