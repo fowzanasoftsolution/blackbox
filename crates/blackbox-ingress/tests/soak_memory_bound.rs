@@ -381,8 +381,14 @@ async fn soak_memory_bound() {
         let rss = blackbox_supervisor::memory::rss_bytes();
         let mib = rss as f64 / (1024.0 * 1024.0);
         let level = blackbox_supervisor::memory::current_ram_level();
+        // Diagnosability: THP=always inflates VmRSS on jemalloc (2 MiB huge
+        // pages back the heap); the verified environment sets `madvise`
+        // (CI normalizes it; Docker did during verification).
+        let thp = std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
         println!(
-            "VmRSS after drain: {mib:.2} MiB (budget {} MiB, level {level:?})",
+            "VmRSS after drain: {mib:.2} MiB (budget {} MiB, level {level:?}, thp [{thp}])",
             RSS_BUDGET_BYTES / 1024 / 1024
         );
         assert!(

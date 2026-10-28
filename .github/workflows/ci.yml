@@ -41,6 +41,21 @@ jobs:
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
 
+      - name: Normalize THP to madvise (soak-memory-gate environment)
+        run: |
+          # soak_memory_bound asserts the whole-process VmRSS < 42 MiB on
+          # jemalloc - the number verified in Docker with THP=madvise.
+          # Runner images ship THP=always, which inflates VmRSS (2 MiB huge
+          # pages back the heap; freed pages return only when a whole
+          # region frees). The runner VM is ephemeral, so no restore needed.
+          if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
+            echo madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled >/dev/null
+            grep -q '\[madvise\]' /sys/kernel/mm/transparent_hugepage/enabled
+            cat /sys/kernel/mm/transparent_hugepage/enabled
+          else
+            echo "THP knob absent on this kernel - leaving as-is"
+          fi
+
       - name: Build (release)
         run: cargo build --workspace --release
 

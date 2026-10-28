@@ -215,6 +215,9 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          # gh resolves the repo from git remotes by default; this job only
+          # downloads artifacts (no checkout), so pin the repo explicitly.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           ARGS=(--title "Blackbox ${RELEASE_TAG}" --notes-file notes.md)
