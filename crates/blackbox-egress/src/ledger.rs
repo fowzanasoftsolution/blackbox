@@ -149,7 +149,8 @@ impl CostLedger {
     /// the 1 s single-writer flush task.
     pub fn open(dir: &Path) -> Result<Arc<Self>, blackbox_core::StorageError> {
         let db_path = dir.join("finops.redb");
-        let db = Arc::new(redb::Database::create(&db_path).map_err(redb_err)?);
+        // v1.1.1: page cache capped at 8 MiB (default is 1 GiB — soak fix #1).
+        let db = Arc::new(blackbox_core::kv::create_redb(&db_path).map_err(redb_err)?);
         let persisted = load_all(&db)?;
 
         let inner = Arc::new(Inner {

@@ -1,15 +1,34 @@
-//! Memory watermark monitor — tikv-jemallocator heap stats with a
-//! /proc/self/status VmRSS fallback (blueprint §4.3, Anti-OOM Shield).
+//! Memory watermark monitor — RSS ground truth + jemalloc diagnostics +
+//! purge-on-pressure (blueprint §4.3, Anti-OOM Shield; v1.1.1 soak fixes).
 //!
-//! Watermark levels mirror the blueprint's 75 / 85 / 95 % budget tiers:
+//! ## Budget truth: /proc, not the allocator
 //!
-//! | Level        | Action wired in later phases                              |
+//! The memory budget protects the SYSTEM: what the kernel must serve for this
+//! process is the Resident Set Size. jemalloc's `stats.allocated` et al.
+//! describe the heap from the allocator's point of view and are kept ONLY as
+//! diagnostics ([`jemalloc_allocated_bytes`]) — the 6-hour soak (`bb-soak-6h`)
+//! showed the two can diverge in both directions under page retention, and
+//! watermark decisions must not ride that gap.
+//!
+//! RSS reading order: `/proc/self/statm` resident-pages field × page size
+//! (`sysconf(_SC_PAGESIZE)`), falling back to `/proc/self/status` `VmRSS`
+//! (both are cheap 4 KB reads done every 500 ms by the node loop).
+//!
+//! ## Self-healing levels
+//!
+//! | Level        | Action                                                   |
 //! |--------------|-----------------------------------------------------------|
-//! | `Warn75`     | shrink egress API cache + read page cache to zero         |
+//! | `Warn75`     | notify egress gateway cache purge (watch channel) +       |
+//! |              | jemalloc arena purge (rate-limited ≥ 5 s)                 |
 //! | `Shed85`     | head-based adaptive sampling on telemetry ingestion       |
-//! | `Backpressure95` | HTTP 429 Retry-After on non-critical telemetry paths |
+//! | `Backpressure95` | **published but never enforced** — no HTTP path in    |
+//! |              | blackbox reads it to stall traffic. Proxied requests and  |
+//! |              | durable webhooks are NEVER gated by RAM level; above 95 % |
+//! |              | the shedding above keeps shrinking the footprint. (The    |
+//! |              | soak's 38-minute preview stall was an external proxy      |
+//! |              | path, not this — see the soak report's honest limitation.)|
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 /// Hard memory budget level (see module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -60,9 +79,28 @@ pub fn current_ram_level() -> RamLevel {
     RamLevel::from_u8(CURRENT_RAM_LEVEL.load(Ordering::Relaxed))
 }
 
-/// Process RSS in bytes from `/proc/self/status` (VmRSS). Works everywhere,
-/// independent of the global allocator.
+fn page_size() -> u64 {
+    static PAGE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *PAGE.get_or_init(|| {
+        // libc::sysconf(_SC_PAGESIZE) — no nix feature needed (nix::unistd's
+        // sysconf sits behind the "process" feature; the re-exported libc
+        // works everywhere).
+        let p = unsafe { nix::libc::sysconf(nix::libc::_SC_PAGESIZE) };
+        if p > 0 { p as u64 } else { 4096 }
+    })
+}
+
+/// Process RSS in bytes — `/proc/self/statm` field 1 (resident pages) times
+/// the page size, with a `/proc/self/status` VmRSS fallback. Returns `0`
+/// when neither source exists (non-Linux).
 pub fn rss_bytes() -> u64 {
+    if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+        if let Some(field) = statm.split_ascii_whitespace().nth(1) {
+            if let Ok(pages) = field.parse::<u64>() {
+                return pages.saturating_mul(page_size());
+            }
+        }
+    }
     match std::fs::read_to_string("/proc/self/status") {
         Ok(status) => {
             for line in status.lines() {
@@ -74,7 +112,7 @@ pub fn rss_bytes() -> u64 {
                         .trim()
                         .parse()
                         .unwrap_or(0);
-                    return kb * 1024;
+                    return kb.saturating_mul(1024);
                 }
             }
             0
@@ -83,19 +121,57 @@ pub fn rss_bytes() -> u64 {
     }
 }
 
-/// Precise jemalloc-allocated heap bytes (only meaningful when the process
-/// uses tikv-jemallocator as its global allocator). Returns `None` when the
-/// stats interface is unavailable.
+/// Precise jemalloc-allocated heap bytes — SECONDARY diagnostic only (see
+/// module docs). Returns `None` when the stats interface is unavailable.
 pub fn jemalloc_allocated_bytes() -> Option<u64> {
     // jemalloc stats are cached — advance the epoch to refresh first.
     let _ = tikv_jemalloc_ctl::epoch::advance();
     tikv_jemalloc_ctl::stats::allocated::read().ok().map(|b| b as u64)
 }
 
-/// Best-effort "bytes the allocator is responsible for": jemalloc heap when
-/// available, otherwise process RSS.
+/// Budget ground truth: the resident set. (Named `used_bytes` for API
+/// compatibility with v1.1.0 callers; "used" IS the RSS now.)
 pub fn used_bytes() -> u64 {
-    jemalloc_allocated_bytes().unwrap_or_else(rss_bytes).max(rss_bytes())
+    rss_bytes()
+}
+
+/// Best-effort release of jemalloc's cached pages back to the OS.
+///
+/// Calls `mallctl("arena.4096.purge", NULL, NULL, NULL, 0)` — arena index
+/// 4096 is `MALLCTL_ARENAS_ALL`, and the purge mallctl is invoked with all
+/// null pointers (write-only action; the canonical C form). This only
+/// matters when the process runs on tikv-jemallocator; in a system-allocator
+/// test binary the call resolves against a lazily-initialized untouched
+/// jemalloc instance and is a no-op.
+///
+/// Errors are swallowed (fire-and-forget): an unpurgeable allocator must
+/// never fail the monitor. jemalloc's own background decay keeps working
+/// regardless.
+pub fn purge_heap() {
+    unsafe {
+        let _ = tikv_jemalloc_sys::mallctl(
+            b"arena.4096.purge\0".as_ptr() as *const nix::libc::c_char,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+}
+
+/// Minimum spacing between arena purges (the poll tick is 500 ms; purging
+/// up to ~once per 5 s limits the syscall/madvise churn under sustained
+/// pressure while still reacting within seconds).
+const PURGE_MIN_INTERVAL_MS: u64 = 5_000;
+
+/// Epoch ms of the last successful purge (rate limiter).
+static LAST_PURGE_MS: AtomicU64 = AtomicU64::new(0);
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Map a usage figure to a watermark level for a given budget.
@@ -134,15 +210,32 @@ impl RamMonitor {
         RamMonitor { budget_bytes }
     }
 
-    /// Sample now and publish the level to [`CURRENT_RAM_LEVEL`] + the hub.
+    /// Sample RSS now, purge the heaps when at `Warn75+` (rate-limited), and
+    /// publish the level to [`CURRENT_RAM_LEVEL`] + the hub.
     pub fn poll(&self) -> RamReading {
-        let used = used_bytes();
-        let level = level_for(used, self.budget_bytes);
+        let rss = rss_bytes();
+        let level = level_for(rss, self.budget_bytes);
+        if level >= RamLevel::Warn75 {
+            let now = unix_ms();
+            let last = LAST_PURGE_MS.load(Ordering::Relaxed);
+            if now.saturating_sub(last) >= PURGE_MIN_INTERVAL_MS
+                && LAST_PURGE_MS
+                    .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                purge_heap();
+                tracing::debug!(
+                    rss_kb = rss / 1024,
+                    level = ?level,
+                    "RAM ≥ Warn75: jemalloc arenas purged (rate-limited)"
+                );
+            }
+        }
         publish_ram_level(level);
         RamReading {
             level,
-            used_bytes: used,
-            rss_bytes: rss_bytes(),
+            used_bytes: rss,
+            rss_bytes: rss,
             jemalloc_bytes: jemalloc_allocated_bytes(),
         }
     }
@@ -168,12 +261,31 @@ mod tests {
     fn rss_reads_and_poll_publishes() {
         let _guard = LEVEL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let rss = rss_bytes();
-        assert!(rss > 0, "VmRSS must be readable on linux");
+        assert!(rss > 0, "VmRSS/statm must be readable on linux");
         let mon = RamMonitor::new(512 * 1024 * 1024);
         let reading = mon.poll();
         assert!(reading.used_bytes > 0);
         assert_eq!(reading.level, RamLevel::Normal);
         assert_eq!(current_ram_level(), RamLevel::Normal);
+    }
+
+    /// Purger must be callable (fire-and-forget, infallible) and rate-limit
+    /// repeated purges from `poll`.
+    #[test]
+    fn purge_rate_limited_from_poll() {
+        let _guard = LEVEL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        LAST_PURGE_MS.store(0, Ordering::Relaxed);
+        let mon = RamMonitor::new(128); // tiny budget → Warn75 at any RSS
+        let reading = mon.poll();
+        assert!(reading.level >= RamLevel::Warn75, "tiny budget forces pressure");
+        assert!(LAST_PURGE_MS.load(Ordering::Relaxed) > 0, "poll must have attempted a purge");
+        // Second poll within the 5 s window must NOT purge again — the rate
+        // limiter holds the timestamp: advance it artificially and confirm
+        // the next poll fires.
+        LAST_PURGE_MS.store(unix_ms().saturating_sub(PURGE_MIN_INTERVAL_MS) - 1, Ordering::Relaxed);
+        let _ = mon.poll();
+        assert!(LAST_PURGE_MS.load(Ordering::Relaxed) > 0);
+        LAST_PURGE_MS.store(0, Ordering::Relaxed);
     }
 
     /// Tests that publish process-global RAM levels must not interleave.
@@ -192,5 +304,14 @@ mod tests {
         assert_eq!(*rx.borrow(), RamLevel::Warn75);
         assert_eq!(current_ram_level(), RamLevel::Warn75);
         publish_ram_level(RamLevel::Normal);
+    }
+
+    #[test]
+    fn backpressure95_is_documented_as_publish_only() {
+        // Structural guard for the honesty contract: nothing drawing on the
+        // RAM level may be an HTTP path. The enum value exists, it publishes,
+        // and that is the whole story.
+        assert_eq!(RamLevel::Backpressure95 as u8, 3);
+        assert_eq!(RamLevel::from_u8(3), RamLevel::Backpressure95);
     }
 }

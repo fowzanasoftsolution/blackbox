@@ -198,6 +198,7 @@ pub async fn spawn_node(cfg: NodeConfig) -> Result<NodeHandle> {
             events: events_rx,
         }),
         max_segment_bytes: cfg.max_segment_mb.saturating_mul(1024 * 1024),
+        ram_budget_bytes: cfg.mem_budget_mb.saturating_mul(1024 * 1024),
         cold: cfg.cold.clone(),
         shield: if cfg.shield { ScannerShield::enabled() } else { ScannerShield::disabled() },
         rate_limit: rate_limiter.clone(),
@@ -311,6 +312,16 @@ pub async fn spawn_node(cfg: NodeConfig) -> Result<NodeHandle> {
 
 /// `blackbox serve` — v1.2+ full node (foreground; Ctrl-C to stop).
 pub async fn serve(cfg: NodeConfig) -> Result<()> {
+    // v1.1.2: install BOTH signal handlers BEFORE any listener binds, and use
+    // eager `signal()` registration (not `ctrl_c()`, which only registers its
+    // handler on first poll — i.e. after `spawn_node` had already opened the
+    // port). With this order there is no window in which the node is reachable
+    // yet still dies on the default disposition, and an inherited SIG_IGN
+    // (detached/background launcher) is overridden up front.
+    let mut sig_int =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut sig_term =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     // Phase 6: S3/R2 cold tier from BLACKBOX_COLD_* env when the caller
     // did not attach one explicitly.
     let cold = cfg.cold.clone().or_else(|| {
@@ -358,11 +369,11 @@ pub async fn serve(cfg: NodeConfig) -> Result<()> {
         node.admin_addr
     );
     println!(
-        "  self-heal:  RAM budget {} MB → 75% purge egress cache · 85% head sampling · 95% backpressure",
+        "  self-heal:  RAM (RSS) budget {} MB → 75% purge caches (egress + jemalloc arenas) · 85% head sampling · 95% published only (never gates traffic)",
         node.ram_budget / 1024 / 1024
     );
     println!(
-        "  storage:    segment cap {} MB · disk quota {} MB · zstd-3 compaction + .idx sidecars",
+        "  storage:    segment cap {} MB · disk quota {} MB · zstd-3 compaction + .idx/.sidx sidecars",
         node.max_segment_bytes / 1024 / 1024,
         node.disk.quota_bytes / 1024 / 1024
     );
@@ -376,7 +387,21 @@ pub async fn serve(cfg: NodeConfig) -> Result<()> {
     }
     println!("  data:       {} (segments + jobs.redb + finops.redb + cold.redb)", node.data_dir.display());
     println!("  Ctrl-C to stop");
-    std::future::pending::<()>().await;
+    // v1.1.2: wait on the ALREADY-registered handlers (registered at the
+    // top of `serve`, before any listener bound). `ctrl_c()` here would only
+    // register on first poll — i.e. after the node was reachable — leaving a
+    // window where a signal lands on the default disposition and kills the
+    // process without a drain. Drain + fsync the writer before returning so
+    // rc is always a clean 0.
+    tokio::select! {
+        _ = sig_int.recv() => { println!("\nblackbox serve: SIGINT — shutting down"); }
+        _ = sig_term.recv() => { println!("\nblackbox serve: SIGTERM — shutting down"); }
+    }
+    // v1.1.2 graceful stop: finish in-flight connections (their Finalizers
+    // push the last ACKNOWLEDGED records), then drain + fsync the writer.
+    // rc is always a clean 0.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), node.proxy.shutdown()).await;
+    println!("blackbox serve: stopped — writer flushed");
     Ok(())
 }
 
@@ -475,7 +500,7 @@ pub mod admin {
     }
 
     async fn stats(state: &Arc<AdminState>) -> serde_json::Value {
-        use blackbox_supervisor::memory::{rss_bytes, used_bytes};
+        use blackbox_supervisor::memory::{jemalloc_allocated_bytes, rss_bytes, used_bytes};
         use blackbox_supervisor::disk;
 
         let idx = state.proxy.stats();
@@ -581,6 +606,8 @@ pub mod admin {
                 "used": used,
                 "budget": state.ram_budget,
                 "rss": rss_bytes(),
+                // Diagnostic only (module docs): allocator-view heap bytes.
+                "jemalloc": jemalloc_allocated_bytes(),
             },
             "disk": {
                 "level": format!("{disk_level:?}"),
@@ -635,6 +662,7 @@ pub mod admin {
                     "enqueued_total": c.enqueued_total, "deduped_total": c.deduped_total,
                     "delivered_total": c.delivered_total, "deadletted_total": c.deadletted_total,
                     "reaped_total": c.reaped_total,
+                    "idem_swept_total": c.idem_swept_total,
                 }),
                 Err(e) => serde_json::json!({ "error": e.to_string() }),
             },

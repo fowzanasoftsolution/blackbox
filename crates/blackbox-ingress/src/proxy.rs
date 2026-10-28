@@ -116,6 +116,12 @@ pub struct IngressConfig {
     /// Rotate the active segment once it exceeds this size (Phase 5;
     /// default 64 MB, configurable down to 1 MB for tests).
     pub max_segment_bytes: u64,
+    /// v1.1.2 RAM budget (bytes) for the segment rollover guard: the
+    /// effective byte cap is `min(max_segment_bytes, ram_budget_bytes / 6)`
+    /// so a 64 MB segment cap on a 48 MB budget rolls over at ~8 MB instead
+    /// of letting the hot index + one giant compaction spike past Shed85.
+    /// 0 = no RAM-derived cap (use `max_segment_bytes` alone).
+    pub ram_budget_bytes: u64,
     /// Phase 6: S3/R2 cold tier — transparent evicted-segment restore +
     /// bit-rot self-heal in `get_trace` (None = local-only retention).
     pub cold: Option<Arc<blackbox_cold::ColdTier>>,
@@ -150,6 +156,7 @@ impl Default for IngressConfig {
             queue: None,
             replay_trace: None,
             max_segment_bytes: blackbox_core::segment::DEFAULT_MAX_SEGMENT_BYTES,
+            ram_budget_bytes: 48 * 1024 * 1024,
             cold: None,
             shield: ScannerShield::disabled(),
             rate_limit: None,
@@ -221,6 +228,11 @@ pub struct ProxyHandle {
     pub index: Arc<RwLock<TraceIndex>>,
     /// Active-segment watch (Phase 5 compactor/janitor subscription).
     pub active_segments: tokio::sync::watch::Receiver<u32>,
+    /// v1.1.2 graceful stop: flipped to `true` to stop accepting and to make
+    /// every connection finish its in-flight request before closing.
+    shutdown: tokio::sync::watch::Sender<bool>,
+    /// v1.1.2: accepted-but-not-yet-finished connections (bounded wait).
+    connections: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ProxyHandle {
@@ -275,6 +287,22 @@ impl ProxyHandle {
 
     pub async fn flush(&self) -> u64 {
         self.sink.flush().await
+    }
+
+    /// v1.1.2 graceful stop: stop accepting new connections, wait (bounded)
+    /// for in-flight connections to finish — their response finalizers push
+    /// the LAST telemetry record, so returning a 200 without this wait could
+    /// lose an ACKNOWLEDGED record on shutdown — then drain + fsync the
+    /// writer. Returns the flushed record count.
+    pub async fn shutdown(&self) -> u64 {
+        let _ = self.shutdown.send(true);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.connections.load(std::sync::atomic::Ordering::Acquire) > 0
+            && Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.flush().await
     }
 
     pub fn dropped(&self) -> u64 {
@@ -400,19 +428,36 @@ pub async fn spawn_proxy(cfg: IngressConfig) -> Result<ProxyHandle, StorageError
 
     let ctx_for_loop = ctx.clone();
     let tls_for_loop = cfg.tls.clone();
-    tokio::spawn(async move {
+    // v1.1.2 graceful stop plumbing: the accept loop stops accepting when
+    // `shutdown` flips, each connection task runs under hyper's
+    // `with_graceful_shutdown` (finishes its in-flight request, then closes
+    // instead of waiting for the client to drop a keep-alive), and the
+    // `connections` counter lets `ProxyHandle::shutdown` bound its wait.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tokio::spawn({
+        let connections = Arc::clone(&connections);
+        async move {
+        let mut shutdown_rx = shutdown_rx;
         loop {
-            let (tcp, peer) = match listener.accept().await {
-                Ok(x) => x,
-                Err(e) => {
-                    tracing::warn!(error = %e, "accept failed");
-                    continue;
-                }
+            let (tcp, peer) = tokio::select! {
+                accepted = listener.accept() => match accepted {
+                    Ok(x) => x,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "accept failed");
+                        continue;
+                    }
+                },
+                // Shutdown requested: stop accepting NEW connections.
+                _ = shutdown_rx.changed() => break,
             };
             // Zero-blocking hot path: TCP_NODELAY on the accepted socket.
             let _ = tcp.set_nodelay(true);
             let ctx = ctx_for_loop.clone();
             let tls = tls_for_loop.clone();
+            let conn_shutdown = shutdown_rx.clone();
+            connections.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let connections = Arc::clone(&connections);
             tokio::spawn(async move {
                 // Phase 7: native TLS termination when configured — the
                 // handshake runs on this task, the hot path stays identical
@@ -424,6 +469,7 @@ pub async fn spawn_proxy(cfg: IngressConfig) -> Result<ProxyHandle, StorageError
                             Ok(s) => ProxyIo::Tls(s),
                             Err(e) => {
                                 tracing::debug!(error = %e, "tls handshake failed");
+                                connections.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                                 return;
                             }
                         }
@@ -439,18 +485,41 @@ pub async fn spawn_proxy(cfg: IngressConfig) -> Result<ProxyHandle, StorageError
                     async move { Ok::<_, std::convert::Infallible>(route(req, ctx).await) }
                 });
                 let svc = hyper_util::service::TowerToHyperService::new(tower_svc);
-                if let Err(e) = hyper::server::conn::http1::Builder::new()
+                // v1.1.2 graceful stop (hyper 1.x pattern): poll the
+                // connection until either it finishes or the shutdown signal
+                // flips; on shutdown, stop reading NEW requests on this
+                // keep-alive connection but keep polling so the in-flight
+                // request completes — its response Finalizer must still push
+                // the acknowledged record before the writer drains.
+                let mut conn_shutdown = conn_shutdown;
+                let mut conn = hyper::server::conn::http1::Builder::new()
                     .serve_connection(TokioIo::new(io), svc)
-                    .with_upgrades()
-                    .await
-                {
+                    .with_upgrades();
+                let result = tokio::select! {
+                    res = &mut conn => res,
+                    _ = conn_shutdown.changed() => {
+                        // `UpgradeableConnection: Unpin`, so Pin::new is sound.
+                        std::pin::Pin::new(&mut conn).graceful_shutdown();
+                        (&mut conn).await
+                    }
+                };
+                if let Err(e) = result {
                     tracing::debug!(error = %e, "connection ended");
                 }
+                connections.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             });
+        }
         }
     });
 
-    Ok(ProxyHandle { local_addr, sink, index, active_segments })
+    Ok(ProxyHandle {
+        local_addr,
+        sink,
+        index,
+        active_segments,
+        shutdown: shutdown_tx,
+        connections,
+    })
 }
 
 /// Listener IO after optional TLS termination (both legs are Unpin, the
@@ -512,6 +581,7 @@ fn spawn_writer_task(cfg: &IngressConfig) -> (RecordSink, Arc<RwLock<TraceIndex>
         channel_cap: cfg.channel_cap,
         sync_interval: cfg.sync_interval,
         max_segment_bytes: cfg.max_segment_bytes,
+        ram_budget_bytes: cfg.ram_budget_bytes,
     };
     let (sink, index, join, active) = crate::writer::spawn_writer_full(wcfg);
     (sink, index, active, join)

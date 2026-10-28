@@ -41,6 +41,8 @@ use tokio::sync::watch;
 
 /// Default active-segment rotation size (blueprint: 64 MB hot segments).
 pub const DEFAULT_MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+/// Hard cap on active-segment trace entries to bound hot index RAM.
+pub const DEFAULT_MAX_ACTIVE_TRACE_ENTRIES: usize = 20_000;
 
 /// Process-wide view of "which segment is the active one". The writer task
 /// owns the [`SegmentStore`] mutably; the Phase 5 compactor / disk-quota
@@ -296,6 +298,7 @@ pub struct SegmentStore {
     /// Index of the ACTIVE segment only (sealed segments are cold-tier data).
     index: Vec<IndexEntry>,
     max_segment_bytes: u64,
+    max_active_trace_entries: usize,
     /// Frames appended since the last fsync (group durability accounting).
     unsynced_frames: u64,
     /// Shared active-segment hub (compactor / janitor / admin subscribers).
@@ -307,12 +310,20 @@ pub struct SegmentStore {
 pub struct SegmentConfig {
     /// Rotate the active segment once it exceeds this size.
     pub max_segment_bytes: u64,
+    /// v1.1.2: rotate the active segment once it holds this many trace
+    /// entries (bounds the hot index regardless of byte size).
+    pub max_active_trace_entries: usize,
+    /// v1.1.2 RAM budget (bytes); the effective byte cap is
+    /// `min(max_segment_bytes, ram_budget_bytes / 6)`. 0 = disabled.
+    pub ram_budget_bytes: u64,
 }
 
 impl Default for SegmentConfig {
     fn default() -> Self {
         SegmentConfig {
             max_segment_bytes: DEFAULT_MAX_SEGMENT_BYTES,
+            max_active_trace_entries: DEFAULT_MAX_ACTIVE_TRACE_ENTRIES,
+            ram_budget_bytes: 0,
         }
     }
 }
@@ -385,11 +396,23 @@ impl SegmentStore {
         };
 
         shared.set_active(id);
+        // v1.1.2 RAM-derived rollover guard: cap the active segment at
+        // `ram_budget_bytes / 6` when that is SMALLER than the configured
+        // byte cap, so a 64 MB segment on a 48 MB budget rolls over at ~8 MB
+        // instead of letting the hot index + one giant compaction spike RSS.
+        let mut max_segment_bytes = config.max_segment_bytes;
+        if config.ram_budget_bytes > 0 {
+            let derived = config.ram_budget_bytes / 6;
+            if derived > 0 && derived < max_segment_bytes {
+                max_segment_bytes = derived;
+            }
+        }
         Ok(SegmentStore {
             dir: dir.to_path_buf(),
             writer: Some(writer),
             index,
-            max_segment_bytes: config.max_segment_bytes,
+            max_segment_bytes,
+            max_active_trace_entries: config.max_active_trace_entries,
             unsynced_frames: 0,
             shared,
         })
@@ -405,13 +428,15 @@ impl SegmentStore {
 
     /// Append a pre-encoded frame (bench hot path reuses encode buffers).
     pub fn append_encoded(&mut self, encoded: &[u8]) -> Result<u64, StorageError> {
-        // Rotate if this frame would push the active segment past the cap.
-        let needs_rotate = self
+        // Rotate if this frame would push the active segment past the cap
+        // or if the active hot index exceeds the trace-entry budget.
+        let needs_rotate_bytes = self
             .writer
             .as_ref()
             .map(|w| w.offset + encoded.len() as u64 > self.max_segment_bytes)
             .unwrap_or(false);
-        if needs_rotate {
+        let needs_rotate_entries = self.index.len() >= self.max_active_trace_entries;
+        if needs_rotate_bytes || needs_rotate_entries {
             self.rotate()?;
         }
 
@@ -594,6 +619,83 @@ pub fn append_records_from(buf: &[u8], out: &mut Vec<TraceRecord>) -> Result<(),
         offset += view.total_len as usize;
     }
     Ok(())
+}
+
+/// Read back MANY records at their byte offsets in ONE segment — the
+/// v1.1.1 trace-index path for sealed-segment lookups. When the segment is
+/// a sealed `.zst`, it is decompressed exactly ONCE per call (a per-frame
+/// `read_record_at` loop would re-decompress per frame); raw segments are
+/// served by preads. Frames failing to decode are logged and skipped,
+/// preserving the caller-level "skip unreadable frames" contract.
+pub fn read_records_at(
+    dir: &Path,
+    segment_id: u32,
+    offsets: &[u64],
+) -> Result<Vec<Option<TraceRecord>>, StorageError> {
+    if offsets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let raw_path = segment_path(dir, segment_id);
+    let (zip_buf, file): (Option<Vec<u8>>, Option<File>) = match File::open(&raw_path) {
+        Ok(f) => (None, Some(f)), // raw segment — targeted preads below
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Sealed compressed segment: decompress ONCE for all offsets.
+            let zst_path = raw_path.with_extension("log.zst");
+            let compressed = std::fs::read(&zst_path).map_err(|_| StorageError::Corrupt {
+                offset: offsets[0],
+                reason: format!("segment {segment_id:06} not found on disk"),
+            })?;
+            let raw = zstd::stream::decode_all(&compressed[..]).map_err(|e| {
+                StorageError::Codec(format!("zstd decompress failed: {e}"))
+            })?;
+            (Some(raw), None)
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut out = Vec::with_capacity(offsets.len());
+    for &offset in offsets {
+        let res: Result<TraceRecord, StorageError> = match &zip_buf {
+            Some(raw) => frame::decode_frame(raw, offset as usize)
+                .map(|(_, r)| r)
+                .map_err(|p| StorageError::Corrupt { offset, reason: p.reason().to_string() }),
+            None => {
+                let f = file.as_ref().ok_or_else(|| {
+                    StorageError::Corrupt { offset, reason: "segment vanished mid-read".into() }
+                })?;
+                read_one_record_at(f, offset)
+            }
+        };
+        match res {
+            Ok(r) => out.push(Some(r)),
+            Err(e) => {
+                tracing::warn!(
+                    segment = segment_id,
+                    offset,
+                    error = %e,
+                    "indexed frame unreadable in batch read; skipping"
+                );
+                out.push(None);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn read_one_record_at(file: &File, offset: u64) -> Result<TraceRecord, StorageError> {
+    use std::os::unix::fs::FileExt;
+    let mut header = [0u8; crate::frame::HEADER_SIZE];
+    file.read_exact_at(&mut header, offset)?;
+    let payload_len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+    if payload_len as u64 > crate::frame::MAX_PAYLOAD as u64 {
+        return Err(StorageError::Corrupt { offset, reason: "bad_length in targeted read".into() });
+    }
+    let total = frame::frame_total_len(payload_len);
+    let mut frame_buf = vec![0u8; total];
+    file.read_exact_at(&mut frame_buf, offset)?;
+    let (_view, record) = frame::decode_frame(&frame_buf, 0)
+        .map_err(|p| StorageError::Corrupt { offset, reason: p.reason().to_string() })?;
+    Ok(record)
 }
 
 /// Read back exactly ONE record at `(segment_id, byte_offset)` — the Phase 2
@@ -967,7 +1069,7 @@ mod tests {
         let dir = tmpdir("rotate");
         let mut store = SegmentStore::open_with(
             &dir,
-            SegmentConfig { max_segment_bytes: 4 * 1024 },
+            SegmentConfig { max_segment_bytes: 4 * 1024, ..Default::default() },
         )
         .unwrap();
 
@@ -1186,7 +1288,7 @@ mod tests {
         let dir = tmpdir("meta-fast");
         let mut store = SegmentStore::open_with(
             &dir,
-            SegmentConfig { max_segment_bytes: 1024 },
+            SegmentConfig { max_segment_bytes: 1024, ..Default::default() },
         )
         .unwrap();
         for seq in 0..6u64 {
@@ -1221,7 +1323,7 @@ mod tests {
         let shared = StoreShared::new();
         let rx = shared.subscribe();
         let mut store =
-            SegmentStore::open_with_shared(&dir, SegmentConfig { max_segment_bytes: 4 * 1024 }, Arc::clone(&shared))
+            SegmentStore::open_with_shared(&dir, SegmentConfig { max_segment_bytes: 4 * 1024, ..Default::default() }, Arc::clone(&shared))
                 .unwrap();
         assert_eq!(*rx.borrow(), 0);
         for seq in 0..40u64 {
@@ -1231,6 +1333,84 @@ mod tests {
         assert!(shared.active() >= 1, "40 records at a 4 KB cap rotate at least once");
         assert_eq!(*rx.borrow(), shared.active());
         assert_eq!(*store.subscribe_active().borrow(), shared.active());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v1.1.2 Fix A (entry count): with a huge byte cap, the active segment
+    /// must STILL roll over once the hot trace map reaches
+    /// `max_active_trace_entries` — this is the guard that kept Node A's
+    /// in-memory index at ~130 K entries on 64 MB segments.
+    #[test]
+    fn entry_count_guard_rotates_despite_huge_byte_cap() {
+        let dir = tmpdir("entry-guard");
+        let mut store = SegmentStore::open_with(
+            &dir,
+            SegmentConfig {
+                max_segment_bytes: 64 * 1024 * 1024, // never hit by these records
+                max_active_trace_entries: 10,
+                ram_budget_bytes: 0,
+            },
+        )
+        .unwrap();
+        for seq in 0..35u64 {
+            store.append(&rec(seq, 16)).unwrap();
+        }
+        store.sync().unwrap();
+        // 35 records / 10 per segment → segments 0..3 rolled, active == 3,
+        // and the hot index holds at most the 10-entry cap (+1 in-flight append).
+        assert!(
+            store.active_segment_id() >= 3,
+            "entry-count guard must rotate the active segment (got {})",
+            store.active_segment_id()
+        );
+        assert!(
+            store.index().len() <= 11,
+            "hot index must stay bounded by max_active_trace_entries (got {})",
+            store.index().len()
+        );
+        // Every record is still durable on disk across the rotations.
+        assert_eq!(read_all_records(&dir).unwrap().len(), 35);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v1.1.2 Fix A (RAM budget): `ram_budget_bytes` derives a TIGHTER byte
+    /// cap (`budget / 6`) than `max_segment_bytes`, so a 64 MB cap on a 48 MB
+    /// budget rotates at ~8 MB. The derived cap must never EXCEED the
+    /// configured one.
+    #[test]
+    fn ram_budget_derives_tighter_byte_cap() {
+        let dir = tmpdir("ram-cap");
+        let mut store = SegmentStore::open_with(
+            &dir,
+            SegmentConfig {
+                max_segment_bytes: 64 * 1024 * 1024,
+                max_active_trace_entries: DEFAULT_MAX_ACTIVE_TRACE_ENTRIES,
+                ram_budget_bytes: 48 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            store.max_segment_bytes,
+            8 * 1024 * 1024,
+            "48 MiB budget / 6 must cap the active segment at 8 MiB"
+        );
+        drop(store);
+
+        // A budget LARGER than the byte cap must not loosen it.
+        let store = SegmentStore::open_with(
+            &dir,
+            SegmentConfig {
+                max_segment_bytes: 4 * 1024 * 1024,
+                ram_budget_bytes: 480 * 1024 * 1024,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            store.max_segment_bytes,
+            4 * 1024 * 1024,
+            "a generous budget must not raise the configured byte cap"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

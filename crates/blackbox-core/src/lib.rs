@@ -20,6 +20,7 @@ pub mod compactor;
 pub mod egress_key;
 pub mod error;
 pub mod frame;
+pub mod kv;
 pub mod queue_actor;
 pub mod schema;
 pub mod segment;

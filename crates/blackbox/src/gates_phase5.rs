@@ -118,7 +118,7 @@ pub async fn gate1() -> Result<()> {
 
     let dir = tmpdir("gate1");
     const SEG_CAP: u64 = 1024 * 1024; // 1 MB — spec rollover threshold
-    let mut store = SegmentStore::open_with(&dir, SegmentConfig { max_segment_bytes: SEG_CAP })?;
+    let mut store = SegmentStore::open_with(&dir, SegmentConfig { max_segment_bytes: SEG_CAP, ..Default::default() })?;
 
     // Compressible 4 KB JSON body (zstd-3 must exceed 4x).
     let big_body = "{\"event\":\"synthetic\",\"pad\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}".repeat(48);
@@ -326,7 +326,7 @@ pub async fn gate1() -> Result<()> {
         remaining_after_evict < pre.len(),
         "eviction must have removed the oldest cold segment's frames"
     );
-    let mut store = SegmentStore::open_with(&dir, SegmentConfig { max_segment_bytes: SEG_CAP })?;
+    let mut store = SegmentStore::open_with(&dir, SegmentConfig { max_segment_bytes: SEG_CAP, ..Default::default() })?;
     assert!(
         store.active_segment_id() >= active,
         "restart must continue at or after the previous active ({}), got {}",

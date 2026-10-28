@@ -15,7 +15,7 @@
 //!   protobuf path is built on.
 //!
 //! The ingress proxy (`blackbox-ingress`) owns the HTTP surface, PII
-//! scrubbing, segment writing and the roaring/bloom trace index; this crate
+//! scrubbing, segment writing and the bloom+sidecar trace index; this crate
 //! is deliberately pure parsing so it is trivially testable against real
 //! SDK payloads.
 

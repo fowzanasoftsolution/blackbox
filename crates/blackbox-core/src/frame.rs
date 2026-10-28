@@ -149,16 +149,29 @@ pub(crate) fn build_frame(trace_id: TraceId, payload: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Parse + CRC-verify the frame header at `start` inside `buf`.
+/// CRC-verified frame header fields (payload bytes not yet read).
 ///
-/// Returns a [`FrameView`] (header only — payload bytes are NOT decoded here
-/// so index scans stay cheap). CRC checks do read the payload bytes.
-pub fn parse_frame(buf: &[u8], start: usize) -> Result<FrameView, FrameProblem> {
-    let remaining = buf.len().saturating_sub(start);
-    if remaining < HEADER_SIZE {
+/// Split out of [`parse_frame`] so streaming readers (the Phase 5
+/// compactor's one-frame-at-a-time indexer) can learn `payload_len` from
+/// the 32-byte header alone: after the header CRC passes, a corrupted
+/// `payload_len` can no longer redirect the subsequent payload read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderView {
+    pub trace_id: TraceId,
+    pub payload_len: u32,
+    pub payload_crc: u32,
+    pub flags: u8,
+}
+
+/// Parse + CRC-verify a 32-byte frame header. Checks run in the same order
+/// as [`parse_frame`]: magic → version → header CRC → length bounds. The
+/// header CRC comes BEFORE the length check so a corrupted `payload_len` is
+/// caught rather than used to bound the payload read.
+pub fn parse_header(h: &[u8]) -> Result<HeaderView, FrameProblem> {
+    if h.len() < HEADER_SIZE {
         return Err(FrameProblem::PartialHeader);
     }
-    let h = &buf[start..start + HEADER_SIZE];
+    let h = &h[..HEADER_SIZE];
 
     let magic = u16::from_le_bytes([h[0], h[1]]);
     if magic != MAGIC {
@@ -169,7 +182,7 @@ pub fn parse_frame(buf: &[u8], start: usize) -> Result<FrameView, FrameProblem> 
         return Err(FrameProblem::BadVersion { got: version });
     }
     let flags = h[3];
-    let payload_len = u32::from_le_bytes([h[4], h[5], h[6], h[7]]) as u64;
+    let payload_len = u32::from_le_bytes([h[4], h[5], h[6], h[7]]);
     let payload_crc = u32::from_le_bytes([h[8], h[9], h[10], h[11]]);
     let mut trace_id = [0u8; 16];
     trace_id.copy_from_slice(&h[12..28]);
@@ -179,12 +192,31 @@ pub fn parse_frame(buf: &[u8], start: usize) -> Result<FrameView, FrameProblem> 
     if crc32c::crc32c(&h[0..28]) != header_crc {
         return Err(FrameProblem::BadHeaderCrc);
     }
-    if payload_len == 0 || payload_len > MAX_PAYLOAD as u64 {
-        return Err(FrameProblem::BadLength { got: payload_len });
+    if payload_len == 0 || payload_len > MAX_PAYLOAD {
+        return Err(FrameProblem::BadLength { got: payload_len as u64 });
     }
 
-    let declared_total = frame_total_len(payload_len as usize) as u64;
-    let available = (buf.len() - start) as u64;
+    Ok(HeaderView {
+        trace_id,
+        payload_len,
+        payload_crc,
+        flags,
+    })
+}
+
+/// Parse + CRC-verify the frame header at `start` inside `buf`.
+///
+/// Returns a [`FrameView`] (header only — payload bytes are NOT decoded here
+/// so index scans stay cheap). CRC checks do read the payload bytes.
+pub fn parse_frame(buf: &[u8], start: usize) -> Result<FrameView, FrameProblem> {
+    let remaining = buf.len().saturating_sub(start);
+    if remaining < HEADER_SIZE {
+        return Err(FrameProblem::PartialHeader);
+    }
+    let hv = parse_header(&buf[start..start + HEADER_SIZE])?;
+
+    let declared_total = frame_total_len(hv.payload_len as usize) as u64;
+    let available = remaining as u64;
     if declared_total > available {
         return Err(FrameProblem::PartialFrame {
             declared_total,
@@ -192,17 +224,17 @@ pub fn parse_frame(buf: &[u8], start: usize) -> Result<FrameView, FrameProblem> 
         });
     }
 
-    let payload = &buf[start + HEADER_SIZE..start + HEADER_SIZE + payload_len as usize];
-    if crc32c::crc32c(payload) != payload_crc {
+    let payload = &buf[start + HEADER_SIZE..start + HEADER_SIZE + hv.payload_len as usize];
+    if crc32c::crc32c(payload) != hv.payload_crc {
         return Err(FrameProblem::BadPayloadCrc);
     }
 
     Ok(FrameView {
-        trace_id,
-        payload_len: payload_len as u32,
+        trace_id: hv.trace_id,
+        payload_len: hv.payload_len,
         total_len: declared_total as u32,
         payload_offset: start as u64 + HEADER_SIZE as u64,
-        flags,
+        flags: hv.flags,
     })
 }
 

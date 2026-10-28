@@ -300,6 +300,18 @@ pub async fn run_node(args: RunArgs) -> Result<()> {
         "`blackbox run` needs a command after `--` (e.g. `blackbox run --upstream-port 3000 -- python3 app.py`)"
     );
 
+    // v1.1.2: install BOTH signal handlers BEFORE `spawn_node` binds any
+    // listener, using eager `signal()` registration (not `ctrl_c()`, which
+    // only registers on first poll — inside the bottom `select!`, i.e. after
+    // the node was already reachable). There must be no window in which the
+    // port is open but a signal still kills the process on the default
+    // disposition; an inherited SIG_IGN (detached/background launcher) is
+    // overridden up front.
+    let mut sig_int =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut sig_term =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
     let node = crate::node::spawn_node(crate::node::NodeConfig {
         listen: args.listen.clone(),
         upstream: format!("127.0.0.1:{}", args.upstream_port),
@@ -364,17 +376,23 @@ pub async fn run_node(args: RunArgs) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let monitor = tokio::spawn(supervise_forever(sup_args, health, shutdown_rx));
 
-    // Foreground: wait for SIGINT / SIGTERM, then tear down cleanly.
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // Foreground: wait on the ALREADY-registered handlers (registered at the
+    // top of `run_node`, before any listener bound). `ctrl_c()` here would
+    // only register on first poll, leaving a window where a signal lands on
+    // the default disposition. An inherited SIG_IGN from a detached/
+    // background launcher was overridden up front (v1.1.2: the 30-minute
+    // soak's Node B ignored SIGINT for exactly this reason).
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => { println!("\nblackbox run: SIGINT — shutting down"); }
-        _ = term.recv() => { println!("\nblackbox run: SIGTERM — shutting down"); }
+        _ = sig_int.recv() => { println!("\nblackbox run: SIGINT — shutting down"); }
+        _ = sig_term.recv() => { println!("\nblackbox run: SIGTERM — shutting down"); }
     }
     let _ = shutdown_tx.send(true);
-    let stats = monitor.await.unwrap_or_default();
-    println!(
-        "blackbox run: stopped — {} spawn(s), {} crash(es), {} hang(s)",
-        stats.spawns, stats.crashes, stats.hangs
-    );
+    // Bound the supervisor teardown; then gracefully stop the proxy
+    // (finish in-flight connections so their Finalizers push the last
+    // ACKNOWLEDGED records) and drain + fsync the segment writer so every
+    // accepted record is durable before we return.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), monitor).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), node.proxy.shutdown()).await;
+    println!("blackbox run: stopped — child supervised, writer flushed");
     Ok(())
 }

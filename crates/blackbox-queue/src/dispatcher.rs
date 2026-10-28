@@ -156,12 +156,25 @@ async fn reaper_loop(store: crate::store::JobStoreHandle, interval: Duration) {
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tick.tick().await; // immediate first tick — skip (startup pass already ran)
+    let mut sweep_tick = 0u32;
     loop {
         tick.tick().await;
         match store.reap_expired(now_ms()).await {
             Ok(0) => {}
             Ok(n) => tracing::info!("lease reaper: recovered {n} expired InFlight job(s)"),
             Err(e) => tracing::error!(error = %e, "lease reaper failed"),
+        }
+        // v1.1.1 soak fix #1: also sweep expired idempotency keys every
+        // ~16 s (the 2 s reaper tick × 8). bq_idem no longer grows for the
+        // process lifetime; the retention window stays the dedup contract.
+        sweep_tick += 1;
+        if sweep_tick >= 8 {
+            sweep_tick = 0;
+            match store.sweep_idem(now_ms()).await {
+                Ok(0) => {}
+                Ok(n) => tracing::debug!("idem sweeper: removed {n} expired key(s)"),
+                Err(e) => tracing::error!(error = %e, "idem sweeper failed"),
+            }
         }
     }
 }

@@ -176,10 +176,12 @@ impl ColdTier {
     pub fn open(cfg: S3Config, data_dir: &Path) -> Result<Arc<ColdTier>, StorageError> {
         std::fs::create_dir_all(data_dir)?;
         let db_path = data_dir.join("cold.redb");
+        // v1.1.1: page cache capped at 8 MiB (default is 1 GiB — soak fix #1).
         let db = if db_path.exists() {
-            redb::Database::open(&db_path).map_err(|e| StorageError::Db(e.to_string()))?
+            blackbox_core::kv::open_redb(&db_path).map_err(|e| StorageError::Db(e.to_string()))?
         } else {
-            redb::Database::create(&db_path).map_err(|e| StorageError::Db(e.to_string()))?
+            blackbox_core::kv::create_redb(&db_path)
+                .map_err(|e| StorageError::Db(e.to_string()))?
         };
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -700,7 +702,7 @@ mod tests {
 
     fn setup(tag: &str) -> MockCold {
         let dir = tmpdir(tag);
-        let mut store = SegmentStore::open_with(&dir, SegmentConfig { max_segment_bytes: 4096 }).unwrap();
+        let mut store = SegmentStore::open_with(&dir, SegmentConfig { max_segment_bytes: 4096, ..Default::default() }).unwrap();
         let mut seq = 0u64;
         // Segment 0..4: healthy 2xx only. Segment 5: contains a crash.
         while store.active_segment_id() < 6 {

@@ -13,7 +13,7 @@ use crate::store::{T_DLQ, T_DUE, T_IDEM, T_JOBS, T_LEASE};
 
 /// Read job-state counts straight from the database file.
 pub fn read_counts_blocking(db_path: &Path) -> Result<JobCounts, StorageError> {
-    let db = redb::Database::open(db_path).map_err(|e| StorageError::Db(e.to_string()))?;
+    let db = blackbox_core::kv::open_redb(db_path).map_err(|e| StorageError::Db(e.to_string()))?;
     let txn = db.begin_read().map_err(|e| StorageError::Db(e.to_string()))?;
     let mut c = JobCounts::default();
     if let Ok(table) = txn.open_table(T_JOBS) {
@@ -33,7 +33,7 @@ pub fn read_counts_blocking(db_path: &Path) -> Result<JobCounts, StorageError> {
 
 /// Retry every dead-lettered job offline (attempt reset, due now).
 pub fn retry_dlq_blocking(db_path: &Path) -> Result<u64, StorageError> {
-    let db = redb::Database::open(db_path).map_err(|e| StorageError::Db(e.to_string()))?;
+    let db = blackbox_core::kv::open_redb(db_path).map_err(|e| StorageError::Db(e.to_string()))?;
     let now = now_ms();
     let mut requeued = 0u64;
     {
@@ -91,7 +91,7 @@ pub fn retry_dlq_blocking(db_path: &Path) -> Result<u64, StorageError> {
 /// Per-queue breakdown for the status surface.
 pub fn queue_breakdown(db_path: &Path) -> Result<Vec<(String, u64, u64, u64)>, StorageError> {
     // (queue, pending, in_flight, dead_letter)
-    let db = redb::Database::open(db_path).map_err(|e| StorageError::Db(e.to_string()))?;
+    let db = blackbox_core::kv::open_redb(db_path).map_err(|e| StorageError::Db(e.to_string()))?;
     let txn = db.begin_read().map_err(|e| StorageError::Db(e.to_string()))?;
     let mut map: std::collections::BTreeMap<String, [u64; 3]> = Default::default();
     if let Ok(table) = txn.open_table(T_JOBS) {
@@ -130,7 +130,7 @@ pub fn data_dir_locked(dir: &Path) -> bool {
         if path.extension().and_then(|x| x.to_str()) != Some("redb") || !path.is_file() {
             continue;
         }
-        match redb::Database::open(&path) {
+        match blackbox_core::kv::open_redb(&path) {
             // We held the exclusive lock for a moment — no contention.
             Ok(_db) => {}
             Err(redb::DatabaseError::DatabaseAlreadyOpen) => return true,

@@ -4,6 +4,7 @@
 [![Release](https://github.com/Nsiowj1/blackbox/actions/workflows/release.yml/badge.svg)](https://github.com/Nsiowj1/blackbox/actions/workflows/release.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
+[![30-min soak](https://img.shields.io/badge/30--min%20soak-20%2F20%20PASS-brightgreen.svg)](#verification-all-measured-on-a-2-vcpu-shared-runner)
 
 </div>
 
@@ -30,9 +31,15 @@ changes.
                                  your app (any language)      S3 / R2 cold tier
 ```
 
-**v1.1 status — all seven phases complete + the Pro differentiators.** 201
+**v1.1.2 status - all seven phases complete + the Pro differentiators.** 216
 workspace tests green in release, **21/21 verification gates passing**, binary
-**17.1 MB**, load RSS **33 MB** (48 MB budget). v1.1 ships the two
+**17.25 MB**, and a **30-minute isolated soak at 20/20**: both nodes peaked at
+**32.0 / 28.2 MiB** (48 MB budget, 189/189 samples `Normal`), **0 records
+sampled out** across 55 compactions / **401,608 streamed-indexed frames**, both
+crash recoveries verified, both nodes shut down rc=0, and the cold-data reopen
+byte-equivalent. v1.1.2 hardens the RAM story end to end: the rollover guard
+bounds the hot segment and map, and compaction + sidecar indexing stream
+frame-by-frame instead of materializing artifacts. v1.1 ships the two
 Pro differentiators as pure Rust: a SimHash near-duplicate prompt cache and a
 tamper-evident audit chain.
 
@@ -423,7 +430,7 @@ CMD ["blackbox", "run", "--listen", "0.0.0.0:8080", "--data", "/data", "--", "/s
 Gate sources live in `crates/*/src/gates_phase<n>.rs` and
 `crates/*/tests/phase<n>_gates.rs` — every gate is also a CI test. Run any
 gate directly: `blackbox p1..p7-gate <n>`, or the whole battery:
-`cargo test --workspace --release` (201 tests) + `blackbox demo --once`.
+`cargo test --workspace --release` (216 tests) + `blackbox demo --once`.
 
 | Phase | Gate | Measured result |
 |---|---|---|
@@ -435,9 +442,24 @@ gate directly: `blackbox p1..p7-gate <n>`, or the whole battery:
 | 6 | cold tier · bit-rot heal · canary update | 10 PUTs + tiered eviction with crash pinning + byte-exact S3 restore · 3 heal rounds, digest-verified · tamper 30 ms reject, broken candidate auto-rollback |
 | 7 | shield · TLS · demo | **5/5 burst + 5× 429 + Retry-After**, 6 scanner paths 404'd, **0 frames recorded** for attacks, <50 µs rejections · self-signed boot + **hot reload, 12 req 0 failures** + garbage-cert resilience · `demo --once` exit 0, **4 engines in 3.1 s** |
 
-**Budgets:** binary **17.1 MB** (red line < 21 MB, final audit < 35 MB) ·
-idle RSS ≈ 18 MB · load RSS 33.1 MB (< 35 MB) · 201 workspace tests green in
+**Budgets:** binary **17.25 MB** (red line < 21 MB, final audit < 35 MB) ·
+idle RSS ≈ 18 MB · load RSS 33.1 MB (< 35 MB) · 216 workspace tests green in
 release.
+
+**30-minute isolated soak (v1.1.2 binary, Daytona sandbox, 1 CPU / 1 GiB
+cgroup):** 269,324 requests @ 149.6 req/s over the full 1800 s window with
+**0 transport errors / 0 unexpected HTTP statuses**; **99,138/99,138 logical
+webhooks delivered** with byte-identical bodies and all 4,960 deliberate
+duplicate submissions deduped; **0 records sampled out, 0 dropped** on both
+nodes (`Shed85` never fired — errors/slow traces stay at 100 % by design); RAM
+peaks **32.0 MiB (Node A) / 28.2 MiB (Node B)** against the 48 MB budget,
+**189/189 samples `Normal`** on both nodes; **55 compactions indexing 401,608
+frames** through the streaming sidecar indexer with `.idx`/`.sidx` present for
+every sealed segment; both injected app crashes recovered health-verified
+(0.26 s / 0.36 s); the post-drain queue fully drained and both nodes exited
+**rc=0**; the cold clone reopen produced byte-equivalent records. Check-level
+verdict **20/20 PASS**; full raw evidence, manifests and hashes live in the
+dated soak report directory outside this repository.
 
 ## Repository layout
 

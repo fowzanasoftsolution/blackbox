@@ -17,6 +17,116 @@ project adheres to [Semantic Versioning](https://semver.org).
   `CONTRIBUTING.md`; README restructured with badges, table of contents and
   an install section.
 
+## [1.1.2] — 2026-10-27
+
+Fix release addressing the two remaining failures from the isolated 30-minute
+Daytona soak of v1.1.1 (Node A peaked at 51.69 MiB / 13 samples ≥48 MiB and
+sampled out 8,662 healthy 2xx records; Node B exited rc=-15 because the
+detached launcher left `serve` without a reachable signal path).
+
+### Fixed
+- **Hot-segment rollover guard** (`blackbox-core::segment`): the active
+  segment now rotates when *either* it exceeds the effective byte cap *or*
+  its in-memory trace index reaches `max_active_trace_entries` (default
+  20,000). The effective byte cap is `min(max_segment_bytes,
+  ram_budget_bytes / 6)` — a 64 MB segment cap on a 48 MB budget now rolls
+  over at ~8 MB, so the hot map and any single compaction stay bounded
+  instead of accumulating ~130K traces before the first rollover.
+- **Streaming segment compaction** (`blackbox-core::compactor`): sealed
+  segments compress through a 64 KB `BufReader` → zstd `Encoder` → 64 KB
+  `BufWriter` stream instead of `encode_all` holding a second full-size
+  compressed `Vec<u8>`; the janitor purges jemalloc arenas right after each
+  compaction that freed segments so reclaimed pages return to the OS
+  immediately.
+- **Streaming sidecar indexing** (`blackbox-core::compactor`): completing
+  the fix above, `compact_one` now builds the `.idx`/`.sidx` sidecars by
+  walking the sealed segment frame-by-frame — a CRC-verified 32-byte
+  `parse_header` sizes each bounded payload read — instead of
+  `read_to_end` materializing the whole artifact in RAM; the `.log.zst`
+  backfill path decompresses through the same one-frame walker instead of
+  `fs::read` + `decode_all`. At most one frame plus the small entry vector
+  is resident during compaction, so a multi-MB compaction can no longer
+  transiently cross the Shed85 watermark (first v1.1.2 soak: 7 healthy 2xx
+  records head-sampled during Node A's segment-15 compaction at t≈1483 s).
+  Torn-tail and decode-truncation semantics are preserved exactly and
+  pinned by a streaming-vs-full-scan parity test. Re-verified: the 30-minute
+  soak re-run passed 20/20 checks with 0 sampled-out / 0 dropped records on
+  both nodes, peaks 32.0 / 28.2 MiB across 55 compactions and 401,608
+  indexed frames, rc=0 shutdowns, and a byte-equivalent cold reopen.
+- **Clean SIGINT/SIGTERM shutdown** (`blackbox run` and `blackbox serve`):
+  both install explicit SIGINT + SIGTERM handlers eagerly via
+  `tokio::signal::unix::signal()` BEFORE any listener binds (overriding any
+  inherited `SIG_IGN` from a detached/background launcher and closing the
+  window where a reachable port still died on the default disposition),
+  gracefully stop the ingress proxy — in-flight connections finish so their
+  response finalizers push the last acknowledged record — then flush the
+  segment writer, and return exit code 0. `serve` previously had no signal
+  path at all — SIGINT was ignored and SIGTERM killed it with rc=-15.
+
+### Soak harness
+- `llm_miss` workload profile now varies distinct words (not just digit
+  runs) so SimHash's digit-run normalization no longer classifies it as a
+  similarity hit; the profile genuinely exercises the cache-miss path.
+
+## [1.1.1] — 2026-10-26
+
+Fix release addressing the four root causes surfaced by the 6-hour
+`bb-soak-6h` run (v1.1.0 binary, both soak nodes saturated their 48 MiB
+RAM budgets — 50,331,648 B each: Node A peaked at 68.9 MiB (143.5% of
+budget), Node B at 48.5 MiB (101%)). Adds the in-repo pass/fail soak gate
+`crates/blackbox-ingress/tests/soak_memory_bound.rs`
+(125 000 durable webhooks, dozens of segment rollovers, full drain,
+Linux VmRSS validated against the 42.0 MiB budget).
+
+### Fixed
+- **Queue RAM floor (Node A `#1`)**: every redb database was open with the
+  crate-default **1 GiB** page cache (`redb::Builder` seeds
+  `set_cache_size(1024*1024*1024)`), and the job queue's B-tree grew its
+  resident set into it all soak long. ALL open sites now go through
+  `blackbox_core::kv::{create_redb, open_redb}` with an **8 MiB** cache cap
+  (correctness unaffected: the cache is eviction-only). Additionally, the
+  `bq_idem` dedup table was never swept — with a 24 h effective retention
+  it grew with EVERY webhook for the lifetime of the process (~a day of
+  webhook keys resident at soak volume). Keys now default to a **5-minute
+  retention window** (covers every documented provider retry cadence) and
+  the dispatcher's reaper deletes expired rows every ~16 s
+  (`JobStoreHandle::sweep_idem`, `queue.idem_swept_total` in
+  `blackbox queue` output). Atomic delivered-total semantics unchanged.
+- **Unbounded trace index (Node A `#2`)**: the in-memory index kept EVERY
+  frame ever recorded (incl. across restarts): a ~56 B/frame `frames` vec,
+  a `trace_id → leaf list` map, and status bitmaps — ~330 K frames resident
+  forever. The index is now a bounded **hot window**: the ACTIVE segment's
+  frames only (`trace_id → (segment, offset)` map + a global 1 MiB +
+  per-segment 8 KiB Bloom filters). At every segment seal the sealed
+  segment leaves RAM; sealed lookups are served from on-disk sidecars —
+  the existing `.idx` plus a NEW trace-id-sorted **`.sidx`** sidecar the
+  compactor writes for every artifact (binary-searched per lookup, then
+  one zstd decompress batch-reads all frames). Cumulative
+  `frames/status_*/sentry/distinct` counters are preserved so the admin
+  dashboard's lifetime view doesn't reset.
+- **RAM monitor honesty (Node A `#3`)**: the watermark monitor now reads
+  **RSS from `/proc`** (`statm` field 1 × page size, `VmRSS` fallback)
+  instead of jemalloc's `stats.allocated` — the budget protects the
+  system, and the allocator view diverges from it under page retention.
+  jemalloc stats are demoted to a diagnostic field (`ram.jemalloc`).
+  At `Warn75`+ the monitor purges caches: the egress gateway cache
+  (existing) AND jemalloc arenas
+  (`mallctl("arena.4096.purge", NULL, NULL, NULL, 0)`, rate-limited to at
+  most one purge per 5 s). **`Backpressure95` is published but never
+  enforced** — no HTTP path in Blackbox gates traffic on RAM level;
+  proxied requests and durable webhooks are never stalled by it. (The
+  soak's 38-minute preview stall was the external preview-proxy path, not
+  Blackbox backpressure — see the soak report's honest limitation.)
+- **Soak harness evidence guard (Node A/B `#4`)**: `scripts/soak/soakctl.sh`
+  now refuses to wipe/re-initialize non-empty data dirs
+  (`SOAK_SECONDS <= 0`, `--collect-only`, or `COLLECT_ONLY=1` selects
+  collect-only mode: no boot, no generator, no crash injection — it jumps
+  straight to final artifact generation over the preserved evidence).
+
+### Changed
+- `roaring` bitmaps are no longer used by the trace index (status classes
+  are cumulative counters); the dependency is gone from the workspace.
+
 ## [1.1.0] — 2026-10-25
 
 The Pro-differentiator release, built to the product blueprint §6 spec:

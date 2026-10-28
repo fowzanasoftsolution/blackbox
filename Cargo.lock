@@ -132,7 +132,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "blackbox"
-version = "0.1.0"
+version = "1.1.2"
 dependencies = [
  "anyhow",
  "blackbox-cold",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "blackbox-cold"
-version = "0.1.0"
+version = "1.1.2"
 dependencies = [
  "anyhow",
  "blackbox-core",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "blackbox-core"
-version = "0.1.0"
+version = "1.1.2"
 dependencies = [
  "crc32c",
  "redb",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "blackbox-egress"
-version = "0.1.0"
+version = "1.1.2"
 dependencies = [
  "blackbox-core",
  "blackbox-supervisor",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "blackbox-ingress"
-version = "0.1.0"
+version = "1.1.2"
 dependencies = [
  "aho-corasick",
  "blackbox-cold",
@@ -247,12 +247,12 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rcgen",
- "roaring",
  "rustls",
  "rustls-pemfile",
  "serde_json",
  "sha2",
  "thiserror",
+ "tikv-jemallocator",
  "tokio",
  "tokio-rustls",
  "tower",
@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "blackbox-queue"
-version = "0.1.0"
+version = "1.1.2"
 dependencies = [
  "blackbox-core",
  "bytes",
@@ -279,18 +279,20 @@ dependencies = [
 
 [[package]]
 name = "blackbox-supervisor"
-version = "0.1.0"
+version = "1.1.2"
 dependencies = [
  "nix",
  "thiserror",
  "tikv-jemalloc-ctl",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "blackbox-telemetry"
-version = "0.1.0"
+version = "1.1.2"
 dependencies = [
  "blackbox-core",
  "brotli",
@@ -372,18 +374,6 @@ dependencies = [
  "quote",
  "syn 3.0.9",
 ]
-
-[[package]]
-name = "bytemuck"
-version = "1.25.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
-
-[[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
@@ -1316,16 +1306,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "roaring"
-version = "0.10.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7b"
-dependencies = [
- "bytemuck",
- "byteorder",
 ]
 
 [[package]]

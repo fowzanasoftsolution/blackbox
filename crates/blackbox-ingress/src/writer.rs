@@ -9,7 +9,7 @@
 //!    benchmarks — the writer is never the bottleneck at 8 K req/s),
 //! 2. fsyncs on the 5 ms group-commit tick when frames are pending,
 //! 3. updates the shared [`TraceIndex`] after every append
-//!    (`trace_id → (segment_id, offset)` + roaring bitmaps),
+//!    (`trace_id → (segment_id, offset)` + status counters),
 //! 4. answers [`WriterMsg::Flush`] with an ack once the queue is drained
 //!    and synced (used by tests and graceful shutdown).
 //!
@@ -42,6 +42,9 @@ pub struct WriterConfig {
     /// Rotate the active segment once it exceeds this size (Phase 5:
     /// configurable down to 1 MB for tests; default 64 MB).
     pub max_segment_bytes: u64,
+    /// v1.1.2 RAM budget (bytes) for the segment rollover guard
+    /// (`min(max_segment_bytes, ram_budget_bytes / 6)`). 0 = disabled.
+    pub ram_budget_bytes: u64,
 }
 
 impl Default for WriterConfig {
@@ -51,6 +54,7 @@ impl Default for WriterConfig {
             channel_cap: DEFAULT_CHANNEL_CAP,
             sync_interval: DEFAULT_SYNC_INTERVAL,
             max_segment_bytes: DEFAULT_MAX_SEGMENT_BYTES,
+            ram_budget_bytes: 48 * 1024 * 1024,
         }
     }
 }
@@ -133,7 +137,11 @@ pub fn spawn_writer_full(
     let shared = StoreShared::new();
     let _store_probe = SegmentStore::open_with_shared(
         &cfg.data_dir,
-        SegmentConfig { max_segment_bytes: cfg.max_segment_bytes },
+        SegmentConfig { 
+            max_segment_bytes: cfg.max_segment_bytes,
+            ram_budget_bytes: cfg.ram_budget_bytes,
+            ..Default::default()
+        },
         Arc::clone(&shared),
     )
     .expect("segment recovery on startup must not fail");
@@ -154,9 +162,10 @@ pub fn spawn_writer_full(
     let dir = cfg.data_dir.clone();
     let sync_interval = cfg.sync_interval;
     let max_segment_bytes = cfg.max_segment_bytes;
+    let ram_budget_bytes = cfg.ram_budget_bytes;
     let shared_for_task = Arc::clone(&shared);
     let join = tokio::spawn(async move {
-        match run_writer(dir, sync_interval, max_segment_bytes, rx, index_for_task, shared_for_task).await {
+        match run_writer(dir, sync_interval, max_segment_bytes, ram_budget_bytes, rx, index_for_task, shared_for_task).await {
             Ok(n) => n,
             Err(e) => {
                 tracing::error!("writer task failed: {e}");
@@ -171,13 +180,18 @@ async fn run_writer(
     dir: PathBuf,
     sync_interval: Duration,
     max_segment_bytes: u64,
+    ram_budget_bytes: u64,
     mut rx: mpsc::Receiver<WriterMsg>,
     index: Arc<RwLock<TraceIndex>>,
     shared: Arc<StoreShared>,
 ) -> Result<u64, StorageError> {
     let mut store = SegmentStore::open_with_shared(
         &dir,
-        SegmentConfig { max_segment_bytes },
+        SegmentConfig { 
+            max_segment_bytes,
+            ram_budget_bytes,
+            ..Default::default()
+        },
         shared,
     )?;
     let mut tick = tokio::time::interval(sync_interval);

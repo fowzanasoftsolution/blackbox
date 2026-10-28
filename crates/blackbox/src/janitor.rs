@@ -52,16 +52,27 @@ pub fn spawn_storage_janitor(
                 })
                 .await;
                 if let Ok(Ok(rep)) = r {
-                    if rep.segments_compacted > 0 || rep.stale_zst_removed > 0 {
+                    if rep.segments_compacted > 0
+                        || rep.sidecars_backfilled > 0
+                        || rep.stale_zst_removed > 0
+                    {
                         stats.compactions.fetch_add(rep.segments_compacted as u64, Ordering::Relaxed);
                         stats.bytes_saved.fetch_add(rep.bytes_saved, Ordering::Relaxed);
                         stats.frames_indexed.fetch_add(rep.frames_indexed, Ordering::Relaxed);
                         tracing::info!(
                             segments = rep.segments_compacted,
+                            backfilled = rep.sidecars_backfilled,
                             saved = rep.bytes_saved,
                             level = ?reading.level,
                             "compacted sealed segments"
                         );
+                        // v1.1.2: compaction just freed the per-segment trace
+                        // HashMap buckets + raw buffers; purge jemalloc arenas
+                        // now so those pages return to the OS immediately
+                        // instead of waiting for background decay.
+                        if rep.segments_compacted > 0 {
+                            blackbox_supervisor::memory::purge_heap();
+                        }
                     }
                 }
             }

@@ -9,6 +9,8 @@ authors.workspace = true
 [dependencies]
 tokio = { workspace = true }
 tikv-jemalloc-ctl = { workspace = true }
+tikv-jemallocator = { workspace = true }
+tikv-jemalloc-sys = { workspace = true } # raw mallctl: the all-null purge call
 nix = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -15,8 +15,8 @@
 //! - [`writer`] — bounded channel (16 384) into a dedicated segment-writer
 //!   task with 5 ms group-commit fsyncs; the proxy is never blocked on disk.
 //! - [`index`] — in-memory trace index: `trace_id → (segment_id, offset)`
-//!   exact map, roaring bitmaps for status classes and `has_sentry_crash`,
-//!   bloom fast-negative path; rebuilt from the startup recovery scan.
+//!   exact map + per-segment bloom fast-negative path; sealed history lives
+//!   in on-disk `.idx`/`.sidx` sidecars, rebuilt from the startup recovery
 //! - [`durable`] — Phase 3 durable webhook ingestion: raw-byte-preserving
 //!   202 path (HMAC-safe), idempotency dedup, scrubbed telemetry copy.
 //! - [`rate_limit`] — Phase 7 sharded lock-free token-bucket rate limiter

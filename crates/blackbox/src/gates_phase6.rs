@@ -64,7 +64,7 @@ const SEG_CAP: u64 = 1024 * 1024; // 1 MB — fast forced rollovers
 /// seg 1 contains a SentryCrash, seg 3 contains a 5xx, seg 2 a 4xx;
 /// the mock-egress trace (`mock_tid`) lives in seg 0 (healthy).
 fn build_segments(dir: &Path, n_segments: u32) -> Result<(u32, [u8; 16], String)> {
-    let mut store = SegmentStore::open_with(dir, SegmentConfig { max_segment_bytes: SEG_CAP })?;
+    let mut store = SegmentStore::open_with(dir, SegmentConfig { max_segment_bytes: SEG_CAP, ..Default::default() })?;
     let big_body = "{\"event\":\"synthetic\",\"pad\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}".repeat(48);
 
     let mock_tid: [u8; 16] = {
@@ -630,7 +630,7 @@ pub async fn gate3() -> Result<()> {
     assert!(data.join("jobs.redb.bak").exists(), "redb snapshot is real");
     {
         // The snapshot must be a VALID, openable redb file.
-        let db = redb::Database::open(data.join("jobs.redb.bak"))
+        let db = blackbox_core::kv::open_redb(data.join("jobs.redb.bak"))
             .context("redb.bak must open as a valid database")?;
         drop(db);
     }

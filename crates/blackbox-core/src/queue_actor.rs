@@ -217,7 +217,8 @@ pub async fn spawn_queue_actor(
 ) -> Result<(QueueHandle, Arc<ActorStats>, tokio::task::JoinHandle<()>), StorageError> {
     let path: PathBuf = db_path.to_path_buf();
     // redb open does file locking + recovery — keep it off the reactor.
-    let db = tokio::task::spawn_blocking(move || redb::Database::create(&path))
+    // v1.1.1: page cache capped at 8 MiB (default is 1 GiB — soak fix #1).
+    let db = tokio::task::spawn_blocking(move || crate::kv::create_redb(&path))
         .await
         .map_err(|e| StorageError::Db(format!("join error: {e}")))?
         .map_err(|e| StorageError::Db(e.to_string()))?;

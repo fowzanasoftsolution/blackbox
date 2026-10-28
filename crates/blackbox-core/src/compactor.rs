@@ -42,7 +42,7 @@ use crate::frame;
 use crate::schema::TraceRecord;
 use crate::segment::{
     frame_meta_of, list_segment_files, parse_segment_name, parse_segment_zst_name,
-    read_record_at, scan_frames, FrameMeta, IndexEntry,
+    read_record_at, FrameMeta, IndexEntry,
 };
 use std::fs::File;
 use std::io::{Read, Write};
@@ -67,6 +67,16 @@ pub struct IdxEntry {
     pub timestamp_ms: u64,
     pub status_class: u8,
     pub kind: u8,
+}
+
+/// Trace-id-SORTED sidecar entry (`.sidx`, v1.1.1). Small on purpose: a
+/// lookup needs only `(offset, seq_no)` — `read_record_at` re-derives
+/// everything else from the frame itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidxEntry {
+    pub trace_id: [u8; 16],
+    pub offset: u64,
+    pub seq_no: u64,
 }
 
 impl IdxEntry {
@@ -171,11 +181,192 @@ pub fn load_idx(dir: &Path, id: u32) -> Result<Option<(u64, Vec<IdxEntry>)>, Sto
     Ok(Some((raw_len, entries)))
 }
 
+// ----------------....... `.sidx` trace-sorted sidecar (v1.1.1) .......-------
+
+const SIDX_MAGIC: [u8; 8] = *b"BBSDX01\0";
+const SIDX_HEADER: usize = 8 + 4 + 4; // magic | segment_id | count
+const SIDX_ENTRY: usize = 16 + 8 + 8; // trace_id | offset | seq_no = 32
+
+/// `.sidx` path for a segment id (`segment_XXXXXX.sidx`).
+pub fn sidx_path(dir: &Path, id: u32) -> PathBuf {
+    dir.join(format!("segment_{id:06}.sidx"))
+}
+
+fn sidx_sort(entries: &mut [SidxEntry]) {
+    entries.sort_unstable_by(|a, b| {
+        a.trace_id.cmp(&b.trace_id).then(a.seq_no.cmp(&b.seq_no))
+    });
+}
+
+/// Write + fsync the trace-id-SORTED `.sidx` sidecar for a segment.
+/// Entries are sorted by `(trace_id BE bytes, seq_no)` so lookups binary-
+/// search with plain preads — the whole file IS the index; nothing large
+/// ever has to live in RAM.
+pub fn write_sidx(dir: &Path, id: u32, mut entries: Vec<SidxEntry>) -> Result<(), StorageError> {
+    sidx_sort(&mut entries);
+    write_sidx_sorted(dir, id, &entries)
+}
+
+fn write_sidx_sorted(dir: &Path, id: u32, entries: &[SidxEntry]) -> Result<(), StorageError> {
+    let mut buf = Vec::with_capacity(SIDX_HEADER + entries.len() * SIDX_ENTRY);
+    buf.extend_from_slice(&SIDX_MAGIC);
+    buf.extend_from_slice(&id.to_le_bytes());
+    buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for e in entries {
+        buf.extend_from_slice(&e.trace_id);
+        buf.extend_from_slice(&e.offset.to_le_bytes());
+        buf.extend_from_slice(&e.seq_no.to_le_bytes());
+    }
+    let path = sidx_path(dir, id);
+    let mut f = File::create(&path)?;
+    f.write_all(&buf)?;
+    f.sync_data()?;
+    Ok(())
+}
+
+/// Load + structurally validate a `.sidx`. `Ok(None)` when absent or
+/// malformed — the lookup then falls back (`.idx` build or zstd scan).
+pub fn load_sidx(dir: &Path, id: u32) -> Result<Option<Vec<SidxEntry>>, StorageError> {
+    let path = sidx_path(dir, id);
+    let mut buf = Vec::new();
+    match File::open(&path) {
+        Ok(mut f) => {
+            if let Err(e) = f.read_to_end(&mut buf) {
+                tracing::warn!(segment = id, error = %e, "sidx sidecar unreadable; ignoring");
+                return Ok(None);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+    if buf.len() < SIDX_HEADER || buf[..8] != SIDX_MAGIC {
+        return Ok(None);
+    }
+    let sid = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+    if sid != id {
+        return Ok(None);
+    }
+    let count = u32::from_le_bytes(buf[12..16].try_into().unwrap()) as usize;
+    if buf.len() != SIDX_HEADER + count * SIDX_ENTRY {
+        return Ok(None);
+    }
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let b = &buf[SIDX_HEADER + i * SIDX_ENTRY..SIDX_HEADER + (i + 1) * SIDX_ENTRY];
+        out.push(SidxEntry {
+            trace_id: b[0..16].try_into().unwrap(),
+            offset: u64::from_le_bytes(b[16..24].try_into().unwrap()),
+            seq_no: u64::from_le_bytes(b[24..32].try_into().unwrap()),
+        });
+    }
+    Ok(Some(out))
+}
+
+/// Best-effort: ensure a trace-sorted `.sidx` exists for `id`.
+///
+/// Priority: pre-existing valid `.sidx` → build one from the `.idx`
+/// sidecar (metadata-only, no decompression) → `Ok(None)` when neither
+/// exists (caller falls back to a full zstd scan for legacy data dirs).
+/// v1.1.1-era data dirs get their `.sidx` while compacting; PRE-1.1.1
+/// soak/legacy dirs are migrated lazily on the first lookup that hits
+/// their bloom.
+pub fn ensure_sidx(dir: &Path, id: u32) -> Result<Option<Vec<SidxEntry>>, StorageError> {
+    if let Some(existing) = load_sidx(dir, id)? {
+        return Ok(Some(existing));
+    }
+    let Some((_, idx_entries)) = load_idx(dir, id)? else {
+        return Ok(None);
+    };
+    // Legacy `.idx` may be stale relative to a torn-tail-trimmed segment —
+    // entries past the artifact end were already ignored by `read_meta_all`
+    // for the REBUILD path; keep that defensive rule here too via offsets
+    // below the zst length (the zst decompresses to ≤ raw_len bytes).
+    let entries: Vec<SidxEntry> = idx_entries
+        .into_iter()
+        .map(|e| SidxEntry { trace_id: e.trace_id, offset: e.offset, seq_no: e.seq_no })
+        .collect();
+    write_sidx(dir, id, entries.clone())?;
+    Ok(Some(entries))
+}
+
+/// Legacy fallback (force-scan): locate EVERY frame of one trace id in a
+/// SEALED segment by decoding its full artifact — a sealed `.zst` is
+/// decompressed exactly once; a sealed raw is scanned as-is. The trace
+/// index reaches this only for artifacts that predate BOTH sidecars
+/// (pre-v1.1.1 soak data).
+pub fn scan_sealed_for_trace(
+    dir: &Path,
+    id: u32,
+    trace_id: &[u8; 16],
+) -> Result<Option<Vec<(u64, u64)>>, StorageError> {
+    // Caller arrives here only when BOTH sidecars are absent/unusable.
+    for (seg_id, path, is_zst) in crate::segment::list_segment_files(dir)? {
+        if seg_id != id {
+            continue;
+        }
+        let raw: Vec<u8> = if is_zst {
+            let compressed = std::fs::read(&path)?;
+            zstd::stream::decode_all(&compressed[..])
+                .map_err(|e| StorageError::Codec(format!("zstd decompress failed: {e}")))?
+        } else {
+            std::fs::read(&path)?
+        };
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        while offset < raw.len() {
+            let (view, record) = match crate::frame::decode_frame(&raw, offset) {
+                Ok(x) => x,
+                Err(p) => {
+                    tracing::warn!(segment = id, offset, reason = %p.reason(), "sealed scan hit a bad frame");
+                    break;
+                }
+            };
+            if record.trace_id == *trace_id {
+                out.push((offset as u64, record.seq_no));
+            }
+            offset += view.total_len as usize;
+        }
+        return Ok(Some(out));
+    }
+    Ok(None)
+}
+
+/// Binary-search a sorted `.sidx` for EVERY frame of one trace id
+/// (consecutive entries in trace_id order). Returns `(offset, seq_no)`
+/// pairs for the matched range — `read_record_at` serves each frame from
+/// there, decompressing on demand.
+pub fn lookup_sidx(
+    dir: &Path,
+    id: u32,
+    trace_id: &[u8; 16],
+) -> Result<Option<Vec<(u64, u64)>>, StorageError> {
+    let Some(entries) = ensure_sidx(dir, id)? else {
+        return Ok(None);
+    };
+    let start = entries.partition_point(|e| e.trace_id.as_slice() < trace_id.as_slice());
+    if start >= entries.len() || entries[start].trace_id != *trace_id {
+        return Ok(None);
+    }
+    let mut end = start;
+    while end < entries.len() && entries[end].trace_id == *trace_id {
+        end += 1;
+    }
+    Ok(Some(
+        entries[start..end]
+            .iter()
+            .map(|e| (e.offset, e.seq_no))
+            .collect(),
+    ))
+}
+
 /// One compaction pass outcome (admin/gate reporting).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CompactionReport {
-    /// Sealed raw segments converted to `.log.zst` (+ `.idx`).
+    /// Sealed raw segments converted to `.log.zst` (+ sidecars).
     pub segments_compacted: u32,
+    /// `.log.zst`-only artifacts whose missing `.idx`/`.sidx` sidecars were
+    /// backfilled (v1.1.1; the artifact itself is untouched).
+    pub sidecars_backfilled: u32,
     /// Raw bytes freed by compression (before → after delta).
     pub bytes_saved: u64,
     /// Frames covered by freshly written sidecars.
@@ -185,10 +376,13 @@ pub struct CompactionReport {
 }
 
 /// Compress every SEALED raw segment (`id != active_id`) into an immutable
-/// `.log.zst` at `level` and write its `.idx` sidecar. Pass
+/// `.log.zst` at `level` and write its `.idx` + `.sidx` sidecars. Pass
 /// `active_id = u32::MAX` for offline compaction (no store is running —
 /// every raw segment is fair game). Idempotent: already-compacted segments
 /// are skipped; a stale `.zst` next to a live raw is replaced.
+/// `.log.zst`-ONLY artifacts flow through as well, so missing sidecars are
+/// backfilled (decompress-once, artifact untouched) and complete ones are
+/// skipped inside `compact_one`.
 ///
 /// Blocks the calling thread — drive it from the janitor task or a
 /// `spawn_blocking`. Never touches the active segment.
@@ -221,89 +415,300 @@ pub fn compact_pass(
         }
     }
 
-    // 1) Compact every sealed raw segment, oldest id first.
-    for (id, _path, is_zst) in list_segment_files(dir)? {
-        if is_zst || id == active_id {
+    // 1) Compact every sealed segment, oldest id first — raw ones to
+    //    `.log.zst` + sidecars, zst-only ones for sidecar backfill.
+    for (id, _path, _is_zst) in list_segment_files(dir)? {
+        if id == active_id {
             continue;
         }
-        if let Some((saved, frames)) = compact_one(dir, id, level)? {
-            report.segments_compacted += 1;
-            report.bytes_saved += saved;
-            report.frames_indexed += frames;
+        match compact_one(dir, id, level)? {
+            Compacted::Skipped => {}
+            Compacted::Compressed { saved, frames } => {
+                report.segments_compacted += 1;
+                report.bytes_saved += saved;
+                report.frames_indexed += frames;
+            }
+            Compacted::Backfilled { frames } => {
+                report.sidecars_backfilled += 1;
+                report.frames_indexed += frames;
+            }
         }
     }
     Ok(report)
 }
 
-/// Compress one sealed raw segment + write its sidecar. Returns
-/// `None` when the raw vanished (racing rotation on an empty segment —
-/// benign), otherwise `(bytes_saved, frames_indexed)`.
-fn compact_one(dir: &Path, id: u32, level: i32) -> Result<Option<(u64, u64)>, StorageError> {
+/// Outcome of one `compact_one` call (admin/gate reporting distinguishes
+/// disk-space compaction from metadata-only sidecar backfill).
+#[derive(Debug)]
+enum Compacted {
+    /// Nothing to do (racing empty-segment rotation, or the artifact
+    /// already carries complete sidecars).
+    Skipped,
+    /// Sealed raw compressed into `.log.zst` + sidecars written.
+    Compressed { saved: u64, frames: u64 },
+    /// `.log.zst`-only artifact: missing sidecars written, artifact
+    /// byte-identical (no recompress, no delete).
+    Backfilled { frames: u64 },
+}
+
+/// Compress one sealed raw segment + write its sidecar, or — when only a
+/// `.log.zst` artifact exists — backfill its missing sidecars (decompress
+/// ONCE, artifact left byte-identical).
+fn compact_one(dir: &Path, id: u32, level: i32) -> Result<Compacted, StorageError> {
     let raw = raw_path(dir, id);
-    let mut buf = Vec::new();
-    match File::open(&raw) {
-        Ok(mut f) => {
-            if let Err(e) = f.read_to_end(&mut buf) {
-                tracing::warn!(segment = id, error = %e, "sealed raw unreadable; skipping");
-                return Ok(None);
-            }
+    let mut file = match File::open(&raw) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // No raw artifact: a `.log.zst`-only segment (sealed with
+            // compression — e.g. `seal_active(true)` — or a pre-v1.1.1
+            // data dir) may still lack its `.idx`/`.sidx` sidecars.
+            // Backfill them from the artifact itself; see the helper.
+            return backfill_sidecars_from_zst(dir, id);
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
-    }
-
-    // Index the raw stream (headers + per-frame metadata).
-    let (valid_len, mut index, _events) = scan_frames(&buf);
-    if valid_len != buf.len() as u64 {
-        // Sealed segments are complete by construction; a torn tail here
-        // means a previous process died mid-write — trim the index to the
-        // valid prefix and proceed with what is durable.
-        tracing::warn!(segment = id, valid_len, len = buf.len(), "sealed segment has a torn tail; indexing the valid prefix");
-        index.retain(|e| e.offset + e.total_len as u64 <= valid_len);
-    }
-
-    let mut entries: Vec<IdxEntry> = Vec::with_capacity(index.len());
-    if !index.is_empty() {
-        // Decode each record once for its metadata (seq/ts/class/kind).
-        let mut offset = 0usize;
-        for entry in &index {
-            let (_view, record) = match frame::decode_frame(&buf, offset) {
-                Ok(x) => x,
-                Err(p) => {
-                    tracing::warn!(segment = id, offset = entry.offset, reason = %p.reason(), "frame decode failed during compaction; sidecar truncated here");
-                    break;
-                }
-            };
-            entries.push(IdxEntry::from_parts(entry, &frame_meta_of(&record)));
-            offset = entry.offset as usize + entry.total_len as usize;
+    };
+    // Sealed segments are immutable, so the file length is the artifact's
+    // byte length even when the walk below stops early at a torn tail.
+    let full_len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(e) => {
+            tracing::warn!(segment = id, error = %e, "sealed raw unreadable; skipping");
+            return Ok(Compacted::Skipped);
         }
-    }
+    };
 
-    if buf.is_empty() {
+    // Index the raw stream (headers + per-frame metadata) ONE FRAME AT A
+    // TIME. v1.1.2's `read_to_end` held the whole sealed segment (multi-MB)
+    // live for the entire compaction — the transient that pushed Node A's
+    // RSS past the Shed85 watermark mid-pass (first soak: 7 healthy 2xx
+    // records head-sampled during segment-15 compaction).
+    let walked = match walk_idx_entries(id, &mut file) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(segment = id, error = %e, "sealed raw unreadable; skipping");
+            return Ok(Compacted::Skipped);
+        }
+    };
+    drop(file);
+    warn_if_torn(id, "sealed segment", walked.valid_len, full_len);
+    let entries = walked.entries;
+
+    if full_len == 0 {
         // Empty segment: sidecar only, no zst artifact.
         write_idx(dir, id, 0, &entries)?;
+        write_sidx(
+            dir,
+            id,
+            entries
+                .iter()
+                .map(|e| SidxEntry { trace_id: e.trace_id, offset: e.offset, seq_no: e.seq_no })
+                .collect(),
+        )?;
         fsync_dir(dir);
         std::fs::remove_file(&raw)?;
         fsync_dir(dir);
-        return Ok(Some((0, 0)));
+        return Ok(Compacted::Compressed { saved: 0, frames: 0 });
     }
 
-    // 1) sidecar, 2) zst (tmp + rename), 3) raw removal — crash-safe order.
-    write_idx(dir, id, buf.len() as u64, &entries)?;
-    let compressed = zstd::stream::encode_all(&buf[..], level)
-        .map_err(|e| StorageError::Codec(format!("zstd compress failed: {e}")))?;
-    let saved = (buf.len().saturating_sub(compressed.len())) as u64;
-    let tmp = zst_path(dir, id).with_extension("zst.tmp");
-    {
-        let mut f = File::create(&tmp)?;
-        f.write_all(&compressed)?;
-        f.sync_data()?;
-    }
-    std::fs::rename(&tmp, zst_path(dir, id))?;
-    fsync_dir(dir);
+    // 1) sidecars, 2) zst (streaming 64KB, tmp + rename), 3) raw removal — crash-safe order.
+    write_idx(dir, id, full_len, &entries)?;
+    write_sidx(
+        dir,
+        id,
+        entries
+            .iter()
+            .map(|e| SidxEntry { trace_id: e.trace_id, offset: e.offset, seq_no: e.seq_no })
+            .collect(),
+    )?;
+    let saved = {
+        use std::io::{BufReader, BufWriter};
+        let tmp = zst_path(dir, id).with_extension("zst.tmp");
+        let mut reader = BufReader::with_capacity(64 * 1024, File::open(&raw)?);
+        let out_file = File::create(&tmp)?;
+        out_file.sync_data()?;
+        let mut writer = BufWriter::with_capacity(64 * 1024, out_file);
+        let mut encoder = zstd::stream::write::Encoder::new(&mut writer, level)
+            .map_err(|e| StorageError::Codec(format!("zstd encode init failed: {e}")))?;
+        std::io::copy(&mut reader, &mut encoder)
+            .map_err(|e| StorageError::Codec(format!("zstd stream copy failed: {e}")))?;
+        encoder.finish()
+            .map_err(|e| StorageError::Codec(format!("zstd finish failed: {e}")))?;
+        writer.flush()?;
+        writer.get_ref().sync_data()?;
+        drop(writer);
+        let compressed_size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+        std::fs::rename(&tmp, zst_path(dir, id))?;
+        fsync_dir(dir);
+        full_len.saturating_sub(compressed_size)
+    };
     std::fs::remove_file(&raw)?;
     fsync_dir(dir);
-    Ok(Some((saved, entries.len() as u64)))
+    Ok(Compacted::Compressed { saved, frames: entries.len() as u64 })
+}
+
+/// Sidecar backfill for a `.log.zst`-ONLY artifact (v1.1.1): decompress it
+/// once, rebuild `.idx` + `.sidx` from the frame stream, and leave the
+/// artifact byte-identical (no recompress, no delete). `Skipped` when the
+/// artifact is absent or BOTH sidecars already load validly — completed
+/// passes skip it in O(sidecar header), keeping compaction idempotent.
+fn backfill_sidecars_from_zst(dir: &Path, id: u32) -> Result<Compacted, StorageError> {
+    if load_idx(dir, id)?.is_some() && load_sidx(dir, id)?.is_some() {
+        return Ok(Compacted::Skipped);
+    }
+    let file = match File::open(zst_path(dir, id)) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Compacted::Skipped),
+        Err(e) => return Err(e.into()),
+    };
+    // Stream-decompress through the same one-frame-at-a-time indexer — the
+    // v1.1.x backfill held BOTH the compressed artifact (`fs::read`) and the
+    // full decompressed buffer (`decode_all`) in RAM.
+    let mut decoder = zstd::stream::read::Decoder::new(file)
+        .map_err(|e| StorageError::Codec(format!("zstd decompress failed: {e}")))?;
+    let walked = walk_idx_entries(id, &mut decoder)
+        .map_err(|e| StorageError::Codec(format!("zstd decompress failed: {e}")))?;
+    // The sidecar's raw_len must be the artifact's FULL decompressed length:
+    // readers skip entries past it (segment.rs rebuild bounds) and the cold
+    // tier's ratio gates assert against it. Drain whatever the walk didn't
+    // consume so it stays exact even after an early stop.
+    let drained = std::io::copy(&mut decoder, &mut std::io::sink())
+        .map_err(|e| StorageError::Codec(format!("zstd decompress failed: {e}")))?;
+    let full_len = walked.consumed + drained;
+    warn_if_torn(id, "zst-only artifact", walked.valid_len, full_len);
+    let entries = walked.entries;
+
+    // Sidecars only — the artifact itself stays exactly as sealed.
+    write_idx(dir, id, full_len, &entries)?;
+    write_sidx(
+        dir,
+        id,
+        entries
+            .iter()
+            .map(|e| SidxEntry { trace_id: e.trace_id, offset: e.offset, seq_no: e.seq_no })
+            .collect(),
+    )?;
+    fsync_dir(dir);
+    tracing::info!(segment = id, frames = entries.len(), "sidecars backfilled for zst-only artifact");
+    Ok(Compacted::Backfilled { frames: entries.len() as u64 })
+}
+
+/// Outcome of a streaming index walk over one artifact's frame stream.
+struct WalkedIdx {
+    /// One `IdxEntry` per frame that parsed AND decoded, in file order.
+    entries: Vec<IdxEntry>,
+    /// End offset of the last PARSE-valid frame — the same `valid_len` the
+    /// old `scan_frames` returned (a decode failure does NOT rewind it; the
+    /// walk continues parsing so torn-tail detection stays parse-based).
+    valid_len: u64,
+    /// Bytes pulled from the stream (≤ full artifact length).
+    consumed: u64,
+}
+
+/// Read exactly `buf.len()` bytes, returning how many arrived (`0` = clean
+/// EOF, `< buf.len()` = short tail). Unlike [`Read::read_exact`], EOF is
+/// reported instead of erroring so the caller can tell a clean end from a
+/// torn write.
+fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut n = 0;
+    while n < buf.len() {
+        match reader.read(&mut buf[n..])? {
+            0 => break,
+            k => n += k,
+        }
+    }
+    Ok(n)
+}
+
+/// Torn-tail warning shared by both callers of [`walk_idx_entries`].
+/// Condition and message shape match the replaced full-buffer indexer
+/// (`valid_len != artifact length`).
+fn warn_if_torn(id: u32, what: &str, valid_len: u64, full_len: u64) {
+    if valid_len != full_len {
+        tracing::warn!(segment = id, valid_len, len = full_len,
+            "{what} has a torn tail; indexing the valid prefix");
+    }
+}
+
+/// Stream-index one artifact's frame sequence into `.idx` entries WITHOUT
+/// materializing it in RAM: at most one frame (`MAX_PAYLOAD`-bounded, in
+/// practice ≤ a few KB) plus the entry vector is resident. This replaces
+/// the v1.1.x `read_to_end` of the whole sealed segment, whose multi-MB
+/// transient crossed the Shed85 watermark mid-compaction.
+///
+/// Semantics mirror the replaced full-buffer scan (`scan_frames` + a
+/// per-frame decode pass) exactly:
+/// - parse failure at frame k  → torn tail at k's start offset; the walk
+///   stops (the caller derives this from `valid_len != artifact length`);
+/// - decode failure at frame k → sidecar truncated at k ("frozen"), but the
+///   walk CONTINUES parsing so `valid_len` still reflects the parse-level
+///   scan — a decode-only failure must not report a torn tail.
+/// Frames are contiguous from offset 0, so the running `valid_len` doubles
+/// as the current frame's start offset.
+fn walk_idx_entries<R: Read>(id: u32, reader: &mut R) -> std::io::Result<WalkedIdx> {
+    let mut entries: Vec<IdxEntry> = Vec::new();
+    // Reused one-frame buffer: grows to the largest frame seen, then holds.
+    let mut frame_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut hdr = [0u8; frame::HEADER_SIZE];
+    let mut valid_len: u64 = 0;
+    let mut consumed: u64 = 0;
+    let mut frozen = false;
+
+    loop {
+        // --- 32-byte header: CRC-verified BEFORE the payload is read, so a
+        //     corrupted length can never redirect or size the payload read.
+        let n = read_exact_or_eof(reader, &mut hdr)?;
+        consumed += n as u64;
+        if n == 0 {
+            break; // clean EOF at a frame boundary
+        }
+        if n < frame::HEADER_SIZE {
+            break; // torn: partial header at `valid_len`
+        }
+        let header = match frame::parse_header(&hdr) {
+            Ok(h) => h,
+            Err(_) => break, // torn: bad header at `valid_len`
+        };
+
+        // --- the rest of this ONE frame: payload + alignment padding ---
+        let total = frame::frame_total_len(header.payload_len as usize);
+        frame_buf.clear();
+        frame_buf.extend_from_slice(&hdr);
+        frame_buf.resize(total, 0);
+        let n = read_exact_or_eof(reader, &mut frame_buf[frame::HEADER_SIZE..])?;
+        consumed += n as u64;
+        if n + frame::HEADER_SIZE < total {
+            break; // torn: partial frame at `valid_len`
+        }
+
+        // Full frame on hand: payload-CRC validation, then (unless the
+        // sidecar is already frozen) decode for its metadata.
+        match frame::parse_frame(&frame_buf, 0) {
+            Ok(view) => {
+                if !frozen {
+                    let payload =
+                        &frame_buf[frame::HEADER_SIZE..frame::HEADER_SIZE + view.payload_len as usize];
+                    match frame::decode_payload(payload) {
+                        Ok(record) => entries.push(IdxEntry::from_parts(
+                            &IndexEntry {
+                                trace_id: view.trace_id,
+                                offset: valid_len,
+                                total_len: view.total_len,
+                            },
+                            &frame_meta_of(&record),
+                        )),
+                        Err(e) => {
+                            tracing::warn!(segment = id, offset = valid_len, error = %e,
+                                "frame decode failed during compaction; sidecar truncated here");
+                            frozen = true; // entries stop; the walk continues
+                        }
+                    }
+                }
+                valid_len += view.total_len as u64;
+            }
+            Err(_) => break, // torn: payload CRC failed (header re-checked above)
+        }
+    }
+    Ok(WalkedIdx { entries, valid_len, consumed })
 }
 
 /// Delete cold `.log.zst` artifacts (+ their `.idx` sidecars) oldest
@@ -480,8 +885,10 @@ pub fn compact_all(dir: &Path, active_id: u32, level: i32) -> Result<CompactionR
     let mut total = CompactionReport::default();
     for _ in 0..4 {
         let r = compact_pass(dir, active_id, level)?;
-        let done = r.segments_compacted == 0 && r.stale_zst_removed == 0;
+        let done =
+            r.segments_compacted == 0 && r.sidecars_backfilled == 0 && r.stale_zst_removed == 0;
         total.segments_compacted += r.segments_compacted;
+        total.sidecars_backfilled += r.sidecars_backfilled;
         total.bytes_saved += r.bytes_saved;
         total.frames_indexed += r.frames_indexed;
         total.stale_zst_removed += r.stale_zst_removed;
@@ -585,7 +992,7 @@ mod tests {
         let dir = tmpdir("compact-sealed");
         let mut store = SegmentStore::open_with(
             &dir,
-            SegmentConfig { max_segment_bytes: 8 * 1024 },
+            SegmentConfig { max_segment_bytes: 8 * 1024, ..Default::default() },
         )
         .unwrap();
         let mut seq = 0u64;
@@ -653,7 +1060,7 @@ mod tests {
         let dir = tmpdir("compact-active");
         let mut store = SegmentStore::open_with(
             &dir,
-            SegmentConfig { max_segment_bytes: 4 * 1024 },
+            SegmentConfig { max_segment_bytes: 4 * 1024, ..Default::default() },
         )
         .unwrap();
         for seq in 0..30u64 {
@@ -677,7 +1084,7 @@ mod tests {
         let dir = tmpdir("evict-fifo");
         let mut store = SegmentStore::open_with(
             &dir,
-            SegmentConfig { max_segment_bytes: 4 * 1024 },
+            SegmentConfig { max_segment_bytes: 4 * 1024, ..Default::default() },
         )
         .unwrap();
         for seq in 0..60u64 {
@@ -729,7 +1136,7 @@ mod tests {
         let dir = tmpdir("compact-idem");
         let mut store = SegmentStore::open_with(
             &dir,
-            SegmentConfig { max_segment_bytes: 4 * 1024 },
+            SegmentConfig { max_segment_bytes: 4 * 1024, ..Default::default() },
         )
         .unwrap();
         for seq in 0..40u64 {
@@ -763,5 +1170,140 @@ mod tests {
         assert_eq!(r3.segments_compacted, 1, "empty raw re-sealed to idx-only");
         assert!(!zst_path(&dir, victim).exists(), "empty segment leaves no zst");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v1.1.2 Fix B (streaming compaction): `compact_one` must compress a
+    /// multi-megabyte raw segment through the 64 KB BufReader -> Encoder ->
+    /// BufWriter stream (never a full-file `Vec`) and produce a byte-exact
+    /// `.zst` round-trip. The segment is deliberately sized >4x the 64 KB
+    /// buffer so the stream loop iterates multiple times.
+    #[test]
+    fn compact_one_streams_multi_buffer_segment_byte_exact() {
+        let dir = tmpdir("stream-compact");
+        // 256 KB cap: seals a segment well past one 64 KB streaming buffer.
+        let mut store = SegmentStore::open_with(
+            &dir,
+            SegmentConfig { max_segment_bytes: 256 * 1024, ..Default::default() },
+        )
+        .unwrap();
+        let mut seq = 0u64;
+        while store.active_segment_id() < 1 {
+            store.append(&rec(tid(seq), seq)).unwrap();
+            seq += 1;
+        }
+        store.sync().unwrap();
+        let active = store.active_segment_id();
+        drop(store);
+
+        let raw_file = raw_path(&dir, 0);
+        let raw_len = std::fs::metadata(&raw_file).unwrap().len();
+        // Rotation seals just BELOW the 256 KiB cap (the next frame would
+        // overflow it), so assert multiple full 64 KB buffers of stream.
+        assert!(
+            raw_len > 3 * 64 * 1024,
+            "test segment must exceed 3 streaming buffers (got {raw_len} B)"
+        );
+        let raw_bytes = std::fs::read(&raw_file).unwrap();
+        // Ground truth for segment 0's frame count. The append loop exits the
+        // moment rotation fires, and the guard-tripping record is written to
+        // the NEW segment — so segment 1 (active) holds exactly that one
+        // record and segment 0 holds the rest. The `.idx` sidecar does not
+        // exist yet (compact_one writes it), so derive from the full scan.
+        let before = crate::segment::read_all_records(&dir).unwrap();
+        assert_eq!(active, 1, "exactly one rotation fired");
+        let seg0_frames = before.len() - 1;
+
+        match compact_one(&dir, 0, 3).unwrap() {
+            Compacted::Compressed { saved, frames } => {
+                assert!(saved > 0, "compressible synthetic JSON must save bytes");
+                assert_eq!(frames as usize, seg0_frames, "segment 0 frame count preserved");
+            }
+            other => panic!("expected Compressed, got {other:?}"),
+        }
+
+        // Raw gone, zst + sidecars present.
+        assert!(!raw_file.exists(), "raw removed last");
+        let zst = zst_path(&dir, 0);
+        assert!(zst.exists());
+        assert!(idx_path(&dir, 0).exists());
+        assert!(sidx_path(&dir, 0).exists());
+
+        // Byte-exact round-trip through the streaming encoder's output.
+        let decompressed = zstd::stream::decode_all(std::io::BufReader::new(
+            std::fs::File::open(&zst).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(decompressed, raw_bytes, "streamed zst is byte-exact");
+
+        // Readers still agree on the same records post-compaction.
+        let after = crate::segment::read_all_records(&dir).unwrap();
+        assert_eq!(before, after, "record stream identical after compaction");
+        assert!(active >= 1, "the sealed segment under test is not the active one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v1.1.2 (completing Fix B): the streaming indexer must produce the
+    /// EXACT entries + `valid_len` the full-buffer scan it replaced
+    /// produced — for a clean stream, every torn-tail truncation point, AND
+    /// a CRC-valid but schema-invalid frame (sidecar freezes, walk keeps
+    /// parsing, no spurious torn-tail report).
+    #[test]
+    fn streaming_indexer_matches_full_buffer_scan() {
+        // The replaced v1.1.x algorithm, verbatim, as the reference.
+        fn reference(buf: &[u8]) -> (u64, Vec<IdxEntry>) {
+            let (valid_len, mut index, _events) = crate::segment::scan_frames(buf);
+            if valid_len != buf.len() as u64 {
+                index.retain(|e| e.offset + e.total_len as u64 <= valid_len);
+            }
+            let mut entries = Vec::new();
+            let mut offset = 0usize;
+            for entry in &index {
+                let (_view, record) = match frame::decode_frame(buf, offset) {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                entries.push(IdxEntry::from_parts(entry, &frame_meta_of(&record)));
+                offset = entry.offset as usize + entry.total_len as usize;
+            }
+            (valid_len, entries)
+        }
+
+        // A real multi-frame stream (each frame ~4 KB of compressible JSON).
+        let mut full = Vec::new();
+        for seq in 0..64u64 {
+            full.extend_from_slice(&frame::encode_frame(&rec(tid(seq), seq)).unwrap());
+        }
+        assert_eq!(reference(&full).1.len(), 64, "test stream must span 64 whole frames");
+
+        // Every truncation point must index the same valid prefix as the
+        // full-buffer scan — including clean EOF and a 0-byte stream.
+        for cut in [0usize, 1, 31, 32, 33, 4096, 4097, full.len() / 2, full.len() - 1, full.len()] {
+            let mut walked =
+                walk_idx_entries(0, &mut std::io::Cursor::new(&full[..cut])).unwrap();
+            let (valid_len, entries) = reference(&full[..cut]);
+            assert_eq!(walked.valid_len, valid_len, "valid_len mismatch at cut {cut}");
+            assert_eq!(walked.entries, entries, "entries mismatch at cut {cut}");
+            assert_eq!(walked.consumed, cut as u64, "consumed mismatch at cut {cut}");
+        }
+
+        // `frame::build_frame` computes a real payload CRC over garbage, so
+        // the frame PARSES (CRC valid) but fails rkyv validation: the
+        // full-buffer scan includes it in `valid_len` yet stops building
+        // entries there — the streaming walk must freeze identically and
+        // must NOT report a torn tail (parse still reached the end).
+        let mut mixed = Vec::new();
+        mixed.extend_from_slice(&frame::encode_frame(&rec(tid(1), 1)).unwrap());
+        mixed.extend_from_slice(&frame::build_frame([0xEE; 16], &[0xFFu8; 64]));
+        mixed.extend_from_slice(&frame::encode_frame(&rec(tid(2), 2)).unwrap());
+        let walked = walk_idx_entries(0, &mut std::io::Cursor::new(&mixed[..])).unwrap();
+        let (valid_len, entries) = reference(&mixed[..]);
+        assert_eq!(walked.valid_len, valid_len, "mixed valid_len");
+        assert_eq!(walked.entries, entries, "mixed entries");
+        assert_eq!(walked.entries.len(), 1, "sidecar frozen at the bad frame");
+        assert_eq!(
+            walked.valid_len as usize,
+            mixed.len(),
+            "decode-only failure must not look like a torn tail"
+        );
     }
 }

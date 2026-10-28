@@ -43,6 +43,9 @@ pub(crate) const T_LEASE: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefin
 pub(crate) const T_DLQ: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("bq_dlq");
 pub(crate) const T_IDEM: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("bq_idem");
 
+/// Fixed redb page-cache budget (8 MiB — see `blackbox_core::kv`).
+pub const REDB_CACHE_BYTES: usize = blackbox_core::kv::REDB_CACHE_BYTES;
+
 /// Actor tuning (group-commit window kept tight — webhook ingest latency is
 /// the product: blueprint target "<1.5 ms 202", Phase 3 gate "p99 < 2 ms").
 #[derive(Debug, Clone)]
@@ -63,7 +66,12 @@ impl Default for JobStoreConfig {
             max_batch: 1_000,
             channel_cap: 8_192,
             reader_timeout: Duration::from_millis(250),
-            idem_retention: Duration::from_secs(24 * 3600),
+            // v1.1.1 soak fix #1: the dedup window was 24 h (matching
+            // provider retries), but the table was never swept — at soak
+            // volume that left ~a day of webhook keys resident forever.
+            // 5 min covers every documented provider retry cadence; the
+            // dispatcher sweeps expired rows every ~16 s.
+            idem_retention: Duration::from_secs(300),
         }
     }
 }
@@ -76,6 +84,8 @@ pub struct JobStoreStats {
     pub delivered_total: AtomicU64,
     pub deadletted_total: AtomicU64,
     pub reaped_total: AtomicU64,
+    /// bq_idem rows removed by `SweepIdem` (v1.1.1).
+    pub idem_swept_total: AtomicU64,
     pub batches_committed: AtomicU64,
     pub ops_committed: AtomicU64,
     pub commit_ms_total: AtomicU64,
@@ -108,6 +118,8 @@ pub struct JobCounts {
     pub delivered_total: u64,
     pub deadletted_total: u64,
     pub reaped_total: u64,
+    /// bq_idem rows removed by the expired-key sweep (v1.1.1).
+    pub idem_swept_total: u64,
 }
 
 /// Result of an (idempotent) enqueue.
@@ -149,6 +161,10 @@ pub(crate) enum WriteKind {
     },
     Reap { now_ms: u64 },
     RetryDlq { now_ms: u64 },
+    /// Delete `bq_idem` rows whose expiry has passed (v1.1.1 soak fix #1:
+    /// without this the 24 h effective TTL made the dedup table grow with
+    /// EVERY webhook for the whole process lifetime).
+    SweepIdem { now_ms: u64 },
 }
 
 pub(crate) struct WriteRequest {
@@ -216,6 +232,7 @@ enum Outcome {
     Failed { applied: bool, dead: bool },
     Reaped(u64),
     Requeued(u64),
+    IdemSwept(u64),
 }
 
 /// Cloneable producer handle to the JobStore actor.
@@ -310,6 +327,16 @@ impl JobStoreHandle {
         rx.await.map_err(|_| StorageError::Closed)?
     }
 
+    /// Delete idempotency keys whose retention window has passed.
+    /// v1.1.1: the dedup table no longer grows unboundedly — the dispatcher's
+    /// reaper calls this on a fixed cadence. Returns the number of rows
+    /// deleted.
+    pub async fn sweep_idem(&self, now_ms: u64) -> Result<u64, StorageError> {
+        let (tx, rx) = oneshot::channel();
+        self.send_write(WriteKind::SweepIdem { now_ms }, ReplySlot::Count(tx)).await?;
+        rx.await.map_err(|_| StorageError::Closed)?
+    }
+
     async fn send_write(
         &self,
         kind: WriteKind,
@@ -374,7 +401,10 @@ pub async fn spawn_job_store(
     config: JobStoreConfig,
 ) -> Result<(JobStoreHandle, Arc<JobStoreStats>, tokio::task::JoinHandle<()>), StorageError> {
     let path: PathBuf = db_path.to_path_buf();
-    let db = tokio::task::spawn_blocking(move || redb::Database::create(&path))
+    // v1.1.1 soak fix #1: redb's default page cache is 1 GiB — the queue
+    // B-tree grew its resident set into it all soak long. Cap it at 8 MiB
+    // for the job store (correctness unaffected: cache is eviction-only).
+    let db = tokio::task::spawn_blocking(move || blackbox_core::kv::create_redb(&path))
         .await
         .map_err(|e| StorageError::Db(format!("join error: {e}")))?
         .map_err(|e| StorageError::Db(e.to_string()))?;
@@ -482,6 +512,7 @@ fn read_counts(db: &redb::Database, stats: &JobStoreStats) -> Result<JobCounts, 
     c.delivered_total = stats.delivered_total.load(Ordering::Relaxed);
     c.deadletted_total = stats.deadletted_total.load(Ordering::Relaxed);
     c.reaped_total = stats.reaped_total.load(Ordering::Relaxed);
+    c.idem_swept_total = stats.idem_swept_total.load(Ordering::Relaxed);
     Ok(c)
 }
 
@@ -909,6 +940,26 @@ async fn commit_batch(
                         }
                         outcomes.push(Outcome::Requeued(requeued));
                     }
+                    WriteKind::SweepIdem { now_ms: sweep_now } => {
+                        // v1.1.1 soak fix #1: drop expired idempotency rows.
+                        // Value layout = job_id BE(16) ++ expires BE(8).
+                        let expired: Vec<Vec<u8>> = idem
+                            .range::<&[u8]>(..)
+                            .map_err(|e| e.to_string())?
+                            .filter_map(|row| row.ok())
+                            .filter(|(_, v)| {
+                                let vb: &[u8] = v.value();
+                                vb.len() == 24
+                                    && u64::from_be_bytes(vb[16..24].try_into().unwrap())
+                                        <= *sweep_now
+                            })
+                            .map(|(k, _)| k.value().to_vec())
+                            .collect();
+                        for k in &expired {
+                            let _ = idem.remove(k.as_slice()).map_err(|e| e.to_string())?;
+                        }
+                        outcomes.push(Outcome::IdemSwept(expired.len() as u64));
+                    }
                 }
             }
             Ok(outcomes)
@@ -957,6 +1008,10 @@ async fn commit_batch(
                                 slot.send_count(n);
                             }
                             Outcome::Requeued(n) => slot.send_count(n),
+                            Outcome::IdemSwept(n) => {
+                                stats_fanout.idem_swept_total.fetch_add(n, Ordering::Relaxed);
+                                slot.send_count(n);
+                            }
                         }
                     }
                 }
@@ -1090,6 +1145,45 @@ mod tests {
         h.enqueue(job(2, "k1", b"a")).await.unwrap();
         let o = h.enqueue(job(3, "k2", b"b")).await.unwrap();
         assert!(!o.deduplicated);
+
+        drop(h);
+        j.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sweep_idem_expires_rows_and_counts() {
+        let dir = tmpdir("sweep");
+        let cfg = JobStoreConfig {
+            idem_retention: Duration::from_millis(150),
+            ..JobStoreConfig::default()
+        };
+        let (h, _s, j) = spawn_job_store(&dir.join("q.redb"), cfg).await.unwrap();
+
+        h.enqueue(job(1, "k-a", b"a")).await.unwrap();
+        h.enqueue(job(2, "k-b", b"b")).await.unwrap();
+        // Key never swept while live:
+        assert!(h.idem_lookup("k-a").await.unwrap().is_some());
+
+        // Let the 150 ms window pass, then sweep.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let now = blackbox_core::schema::now_ms();
+        let swept = h.sweep_idem(now).await.unwrap();
+        assert_eq!(swept, 2, "both expired idem keys must be removed");
+        assert!(h.idem_lookup("k-a").await.unwrap().is_none());
+        assert!(h.idem_lookup("k-b").await.unwrap().is_none());
+
+        // Idempotency of the sweep itself: second pass deletes nothing.
+        let again = h.sweep_idem(now).await.unwrap();
+        assert_eq!(again, 0);
+
+        // A fresh key written AFTER the sweep survives (expiry in the future).
+        h.enqueue(job(3, "k-c", b"c")).await.unwrap();
+        assert!(h.sweep_idem(now).await.unwrap() == 0, "fresh key not expired yet");
+        assert!(h.idem_lookup("k-c").await.unwrap().is_some());
+
+        let c = h.counts().await.unwrap();
+        assert_eq!(c.idem_swept_total, 2, "lifetime sweep counter is cumulative");
 
         drop(h);
         j.await.unwrap();
