@@ -17,6 +17,59 @@ project adheres to [Semantic Versioning](https://semver.org).
   `CONTRIBUTING.md`; README restructured with badges, table of contents and
   an install section.
 
+## [1.1.3] — 2026-10-28
+
+Hardening release cut from main `85621c1` after a third consecutive 30-minute
+soak (v1.1.2c evidence run) passed 20/20. Carries one product change over the
+v1.1.2 tag plus the banner/version-drift fix.
+
+### Fixed
+- **Sealed-segment corruption now surfaces for self-heal**
+  (`blackbox-core::segment::read_records_at`): RAW segments keep the
+  torn-tail skip contract (a kill -9 mid-append legitimately leaves an
+  unreadable tail, which is logged and skipped), but a SEALED `.zst` is the
+  product of a completed, fsync'd seal — any unreadable frame inside it is
+  bit-rot, and the call now fails with `StorageError::Corrupt` so the caller
+  triggers the cold-tier self-heal. The old behavior (`Ok` with silently
+  skipped frames) left a corrupt sealed segment unhealed forever. Pinned by
+  the `corrupt_sealed_zst_read_surfaces_error_for_self_heal` unit test, the
+  demo phase E determinism rework, and a new shutdown-gate test
+  (`crates/blackbox/tests/serve_shutdown.rs`).
+- **Banner / `--version` drift** (`blackbox` crate): the runtime banner and
+  the clap `about` string hardcoded `v1.2` while `--version` printed the real
+  package version. Both now derive from `CARGO_PKG_VERSION` at compile time
+  (`concat!("v", env!("CARGO_PKG_VERSION"))`), so they can never diverge
+  again.
+
+### Verified
+Third 30-minute isolated Daytona soak (binary `02d32685…d1d2ce`, identical
+cgroups `cpu.max=100000 100000` / `memory.max=1073741824`, same harness):
+
+| Metric | run-1 (2026-10-27) | v1.1.2b re-run (2026-10-28) | v1.1.2c (this run) |
+|---|---|---|---|
+| Verdict | **FAIL** — 19/20, `no_record_drops_or_sampling` | PASS — 20/20 | **PASS — 20/20** |
+| Node A sampled-out | **7** (t=1492.2 s) | 0 | **0** |
+| Node B sampled-out | 0 | 0 | **0** |
+| Node A RSS peak | 36.67 MiB (2× `Warn75`) | 32.00 MiB (all `Normal`) | **31.82 MiB** (189/189 `Normal`) |
+| Node B RSS peak | 31.44 MiB | 28.23 MiB | **28.29 MiB** (all `Normal`) |
+| Node A compactions / frames indexed | 18 / 266,632 | 18 / 266,689 | **18 / 266,690** |
+| Node B compactions / frames indexed | 36 / — | 37 / 134,919 | **36 / 131,274** |
+| HTTP requests | 267,589 | 269,324 (149.6 req/s) | **267,440** (148.6 req/s) |
+| Transport errors / unexpected statuses | 0 / 0 | 0 / 0 | **0 / 0** |
+| Crash recoveries (T+600 s, T+1200 s) | verified | 0.256 s / 0.357 s | **0.203 s / 0.257 s** |
+| Shutdown | rc=0 both | rc=0 both | **rc=0 both** |
+| Node B clone reopen | PASS | PASS | **PASS** (3/3 cold traces byte-equivalent) |
+| Binary SHA-256 | `10c22e7e…25d140c` | `33a3b351…ba83db2` | **`02d32685…d1d2ce`** |
+
+Note: this run's sandbox runs a newer kernel (`7.0.0-38-generic` vs
+`6.17.0-35-generic` for both prior runs); cgroups were byte-identical, but
+sub-MiB cross-kernel RSS comparisons are approximate. The soak proves the
+sealed-read change does not regress the healthy path (no corruption is
+injected by the workload; the `Err(Corrupt)` semantics themselves are
+unit-level, not soak-exercised). `Shed85` head-sampling keeps errors/slow
+traces at 100% by design and `Backpressure95` remains informational — zero
+sampled-out records here because RSS never left `Normal`.
+
 ## [1.1.2] — 2026-10-27
 
 Fix release addressing the two remaining failures from the isolated 30-minute

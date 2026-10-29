@@ -310,7 +310,7 @@ pub async fn spawn_node(cfg: NodeConfig) -> Result<NodeHandle> {
     })
 }
 
-/// `blackbox serve` — v1.2+ full node (foreground; Ctrl-C to stop).
+/// `blackbox serve` — full node (foreground; Ctrl-C to stop).
 pub async fn serve(cfg: NodeConfig) -> Result<()> {
     // v1.1.2: install BOTH signal handlers BEFORE any listener binds, and use
     // eager `signal()` registration (not `ctrl_c()`, which only registers its
@@ -333,8 +333,8 @@ pub async fn serve(cfg: NodeConfig) -> Result<()> {
 
     let scheme = if node.tls.is_some() { "https" } else { "http" };
     println!(
-        "blackbox v1.2 node listening on {scheme}://{} (upstream {})",
-        node.proxy.local_addr, upstream
+        concat!("blackbox ", concat!("v", env!("CARGO_PKG_VERSION")), " node listening on {}://{} (upstream {})"),
+        scheme, node.proxy.local_addr, upstream
     );
     println!("  ingress:    reverse proxy + /webhooks,/jobs durable 202s + Sentry/OTLP ingestion");
     match (&node.tls, &tls_opts) {

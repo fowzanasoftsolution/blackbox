@@ -31,15 +31,18 @@ changes.
                                  your app (any language)      S3 / R2 cold tier
 ```
 
-**v1.1.2 status - all seven phases complete + the Pro differentiators.** 216
+**v1.1.3 status - all seven phases complete + the Pro differentiators.** 217
 workspace tests green in release, **21/21 verification gates passing**, binary
-**17.25 MB**, and a **30-minute isolated soak at 20/20**: both nodes peaked at
-**32.0 / 28.2 MiB** (48 MB budget, 189/189 samples `Normal`), **0 records
-sampled out** across 55 compactions / **401,608 streamed-indexed frames**, both
-crash recoveries verified, both nodes shut down rc=0, and the cold-data reopen
-byte-equivalent. v1.1.2 hardens the RAM story end to end: the rollover guard
-bounds the hot segment and map, and compaction + sidecar indexing stream
-frame-by-frame instead of materializing artifacts. v1.1 ships the two
+**17.18 MB**, and a **30-minute isolated soak at 20/20** (three runs; latest
+on main `85621c1`): both nodes peaked at **31.8 / 28.3 MiB** (48 MB budget,
+189/189 samples `Normal`), **0 records sampled out** across 54 compactions /
+**397,964 streamed-indexed frames**, both crash recoveries verified, both
+nodes shut down rc=0, and the cold-data reopen byte-equivalent. v1.1.2
+hardened the RAM story end to end: the rollover guard bounds the hot segment
+and map, and compaction + sidecar indexing stream frame-by-frame instead of
+materializing artifacts. v1.1.3 adds sealed-read corruption surfacing for the
+cold-tier self-heal and pins the startup banner to `CARGO_PKG_VERSION` so it
+can no longer drift from `blackbox --version`. v1.1 ships the two
 Pro differentiators as pure Rust: a SimHash near-duplicate prompt cache and a
 tamper-evident audit chain.
 
@@ -442,24 +445,51 @@ gate directly: `blackbox p1..p7-gate <n>`, or the whole battery:
 | 6 | cold tier · bit-rot heal · canary update | 10 PUTs + tiered eviction with crash pinning + byte-exact S3 restore · 3 heal rounds, digest-verified · tamper 30 ms reject, broken candidate auto-rollback |
 | 7 | shield · TLS · demo | **5/5 burst + 5× 429 + Retry-After**, 6 scanner paths 404'd, **0 frames recorded** for attacks, <50 µs rejections · self-signed boot + **hot reload, 12 req 0 failures** + garbage-cert resilience · `demo --once` exit 0, **4 engines in 3.1 s** |
 
-**Budgets:** binary **17.25 MB** (red line < 21 MB, final audit < 35 MB) ·
-idle RSS ≈ 18 MB · load RSS 33.1 MB (< 35 MB) · 216 workspace tests green in
+**Budgets:** binary **17.18 MB** (red line < 21 MB, final audit < 35 MB) ·
+idle RSS ≈ 18 MB · load RSS 33.1 MB (< 35 MB) · 217 workspace tests green in
 release.
 
-**30-minute isolated soak (v1.1.2 binary, Daytona sandbox, 1 CPU / 1 GiB
-cgroup):** 269,324 requests @ 149.6 req/s over the full 1800 s window with
-**0 transport errors / 0 unexpected HTTP statuses**; **99,138/99,138 logical
-webhooks delivered** with byte-identical bodies and all 4,960 deliberate
-duplicate submissions deduped; **0 records sampled out, 0 dropped** on both
-nodes (`Shed85` never fired — errors/slow traces stay at 100 % by design); RAM
-peaks **32.0 MiB (Node A) / 28.2 MiB (Node B)** against the 48 MB budget,
-**189/189 samples `Normal`** on both nodes; **55 compactions indexing 401,608
-frames** through the streaming sidecar indexer with `.idx`/`.sidx` present for
-every sealed segment; both injected app crashes recovered health-verified
-(0.26 s / 0.36 s); the post-drain queue fully drained and both nodes exited
-**rc=0**; the cold clone reopen produced byte-equivalent records. Check-level
-verdict **20/20 PASS**; full raw evidence, manifests and hashes live in the
-dated soak report directory outside this repository.
+**30-minute isolated soaks (Daytona sandbox, 1 CPU / 1 GiB cgroup):** the
+latest run (v1.1.2c — main `85621c1`, binary `02d32685…d1d2ce`) posted
+267,440 requests @ 148.6 req/s over the full 1800 s window with **0 transport
+errors / 0 unexpected HTTP statuses**; **98,444/98,444 logical webhooks
+delivered** with byte-identical bodies and all 4,926 deliberate duplicate
+submissions deduped; **0 records sampled out, 0 dropped** on both nodes
+(`Shed85` never fired — errors/slow traces stay at 100 % by design); RAM
+peaks **31.82 MiB (Node A) / 28.29 MiB (Node B)** against the 48 MB budget,
+**189/189 samples `Normal`** on both nodes; **54 compactions indexing
+397,964 frames** through the streaming sidecar indexer with `.idx`/`.sidx`
+present for every sealed segment; both injected app crashes recovered
+health-verified (0.203 s / 0.257 s); the post-drain queue fully drained and
+both nodes exited **rc=0**; the cold clone reopen produced byte-equivalent
+records. Check-level verdict **20/20 PASS**; full raw evidence, manifests
+and hashes live in the dated soak report directory outside this repository.
+
+**Three-run comparison** (identical cgroups and harness throughout; the
+third run's sandbox has a newer kernel — `7.0.0-38-generic` vs
+`6.17.0-35-generic` — so sub-MiB cross-run RSS comparisons are approximate):
+
+| Metric | run-1 (2026-10-27) | re-run (2026-10-28) | v1.1.2c (main `85621c1`) |
+|---|---|---|---|
+| Verdict | **FAIL** — 19/20, `no_record_drops_or_sampling` | PASS — 20/20 | **PASS — 20/20** |
+| Node A sampled-out | **7** (t=1492.2 s) | 0 | **0** |
+| Node B sampled-out | 0 | 0 | **0** |
+| Node A RSS peak | 36.67 MiB (2× `Warn75`) | 32.00 MiB (all `Normal`) | **31.82 MiB** (189/189 `Normal`) |
+| Node B RSS peak | 31.44 MiB | 28.23 MiB | **28.29 MiB** (all `Normal`) |
+| Compactions / frames indexed (A · B) | 18/266,632 · 36/— | 18/266,689 · 37/134,919 | **18/266,690 · 36/131,274** |
+| HTTP requests | 267,589 | 269,324 (149.6 req/s) | **267,440** (148.6 req/s) |
+| Transport errors / unexpected statuses | 0 / 0 | 0 / 0 | **0 / 0** |
+| Crash recoveries (T+600 s, T+1200 s) | verified | 0.256 s / 0.357 s | **0.203 s / 0.257 s** |
+| Shutdown | rc=0 both | rc=0 both | **rc=0 both** |
+| Node B clone reopen | PASS | PASS | **PASS** (3/3 cold traces byte-equivalent) |
+| Binary SHA-256 | `10c22e7e…25d140c` | `33a3b351…ba83db2` | **`02d32685…d1d2ce`** |
+
+**Post-release hardening on main (`85621c1`, shipped in v1.1.3):** sealed-
+segment reads now **surface corruption** — a RAW segment keeps the torn-tail
+skip contract (kill -9 mid-append legitimately leaves an unreadable tail),
+but any unreadable frame inside a completed, fsync'd SEALED `.zst` is bit-rot
+and fails with `StorageError::Corrupt`, so the caller triggers the cold-tier
+self-heal instead of silently skipping the segment forever.
 
 ![Node RSS timeline — run-1 vs re-verification run](docs/soak/rss-timeline.svg)
 

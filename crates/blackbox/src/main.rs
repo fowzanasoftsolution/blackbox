@@ -51,7 +51,11 @@ fn tune_jemalloc_decay() {
 #[command(
     name = "blackbox",
     version,
-    about = "Project Blackbox — Rust Omni-Sidecar & Self-Healing Architecture (v1.2: rate-limit shield + WAF + native TLS + one-command demo)"
+    about = concat!(
+        "Project Blackbox — Rust Omni-Sidecar & Self-Healing Architecture (v",
+        env!("CARGO_PKG_VERSION"),
+        ": rate-limit shield + WAF + native TLS + one-command demo)"
+    )
 )]
 struct Cli {
     #[command(subcommand)]
