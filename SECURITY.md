@@ -9,7 +9,7 @@ anyone else does.
 
 **Please do not open a public GitHub issue for security reports.**
 
-Use GitHub's [private vulnerability reporting](https://github.com/Nsiowj1/blackbox/security/advisories/new):
+Use GitHub's [private vulnerability reporting](https://github.com/fowzanasoftsolution/blackbox/security/advisories/new):
 
 1. Go to the repository's **Security** tab → **Advisories** →
    **New draft security advisory**.

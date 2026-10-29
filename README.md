@@ -1,7 +1,7 @@
 <div align="center">
 
-[![CI](https://github.com/Nsiowj1/blackbox/actions/workflows/ci.yml/badge.svg)](https://github.com/Nsiowj1/blackbox/actions/workflows/ci.yml)
-[![Release](https://github.com/Nsiowj1/blackbox/actions/workflows/release.yml/badge.svg)](https://github.com/Nsiowj1/blackbox/actions/workflows/release.yml)
+[![CI](https://github.com/fowzanasoftsolution/blackbox/actions/workflows/ci.yml/badge.svg)](https://github.com/fowzanasoftsolution/blackbox/actions/workflows/ci.yml)
+[![Release](https://github.com/fowzanasoftsolution/blackbox/actions/workflows/release.yml/badge.svg)](https://github.com/fowzanasoftsolution/blackbox/actions/workflows/release.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![30-min soak](https://img.shields.io/badge/30--min%20soak-20%2F20%20PASS-brightgreen.svg)](#verification-all-measured-on-a-2-vcpu-shared-runner)
@@ -75,13 +75,13 @@ tamper-evident audit chain.
 release, verifies the SHA-256 checksum, installs to `/usr/local/bin`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Nsiowj1/blackbox/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/fowzanasoftsolution/blackbox/main/scripts/install.sh | sh
 ```
 
 **From source** — Rust stable, no C toolchain needed:
 
 ```bash
-git clone https://github.com/Nsiowj1/blackbox && cd blackbox
+git clone https://github.com/fowzanasoftsolution/blackbox && cd blackbox
 cargo build --release --workspace
 sudo cp target/release/blackbox /usr/local/bin/   # or ~/.local/bin
 ```

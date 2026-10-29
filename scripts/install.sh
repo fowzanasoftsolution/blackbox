@@ -1,14 +1,14 @@
 #!/bin/sh
 # Blackbox installer — clean POSIX sh.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Nsiowj1/blackbox/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/fowzanasoftsolution/blackbox/main/scripts/install.sh | sh
 #
 # Detects OS/arch, downloads the latest GitHub Release binary, verifies its
 # SHA-256 against the published SHA256SUMS, installs to /usr/local/bin (or
 # ~/.local/bin when not root) and prints the 60-second quickstart.
 #
 # Environment overrides:
-#   BLACKBOX_REPO          GitHub repo slug        (default Nsiowj1/blackbox)
+#   BLACKBOX_REPO          GitHub repo slug        (default fowzanasoftsolution/blackbox)
 #   BLACKBOX_INSTALL_DIR   install prefix dir      (default /usr/local/bin)
 #   BLACKBOX_TOKEN         GitHub token for private repos (optional)
 #   BLACKBOX_DOWNLOAD_BASE serve files from this URL instead of GitHub releases
@@ -16,7 +16,7 @@
 
 set -eu
 
-REPO="${BLACKBOX_REPO:-Nsiowj1/blackbox}"
+REPO="${BLACKBOX_REPO:-fowzanasoftsolution/blackbox}"
 INSTALL_DIR="${BLACKBOX_INSTALL_DIR:-/usr/local/bin}"
 
 log()  { printf '%s\n' "==> $*"; }
@@ -150,6 +150,6 @@ cat <<'EOS'
       blackbox serve --upstream 127.0.0.1:3000 --tls-self-signed
 
   Admin dashboard + API:  http://127.0.0.1:9690
-  Docs:                   https://github.com/Nsiowj1/blackbox#readme
+  Docs:                   https://github.com/fowzanasoftsolution/blackbox#readme
 
 EOS
