@@ -8,17 +8,26 @@
   :root{--bg:#0b0e14;--card:#121722;--line:#1e2635;--fg:#dbe4f0;--dim:#7d8ca3;--ok:#3fb27f;--warn:#e0a83a;--bad:#e05b5b;--accent:#5aa7ff;--mono:'SF Mono',Consolas,monospace}
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;padding:24px}
-  h1{font-size:19px;letter-spacing:.4px;margin-bottom:2px}
+  h1{font-size:19px;letter-spacing:.4px;display:flex;align-items:center;gap:10px}
   .sub{color:var(--dim);font-size:12px;margin-bottom:20px}
+  .pill{font-size:11px;padding:2px 8px;border-radius:6px;border:1px solid var(--line);font-family:var(--mono)}
+  .pill.on{color:var(--ok);border-color:#1f4a36}
+  .pill.off{color:var(--dim)}
+  .pill.acc{color:var(--accent);border-color:#1d3a55}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);animation:pulse 2s infinite}
+  @keyframes pulse{50%{opacity:.35}}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
   .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
   .card h2{font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);margin-bottom:10px}
   .kv{display:flex;justify-content:space-between;padding:3px 0;font-size:13px}
   .kv span:first-child{color:var(--dim)}
   .big{font-size:26px;font-weight:650;letter-spacing:-.5px}
-  .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.acc{color:var(--accent)}
+  .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.acc{color:var(--accent)}.dim{color:var(--dim)}
   .bar{height:7px;background:#0d1420;border-radius:4px;overflow:hidden;margin:8px 0 2px}
   .bar i{display:block;height:100%;border-radius:4px;transition:width .4s}
+  .spark{display:block;width:100%;height:44px;margin:6px 0 2px}
+  .mix{display:flex;height:9px;border-radius:4px;overflow:hidden;margin:8px 0 4px}
+  .mix i{transition:width .4s}
   table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px}
   th{color:var(--dim);text-align:left;font-weight:500;padding:4px 6px;border-bottom:1px solid var(--line)}
   td{padding:4px 6px;border-bottom:1px solid #161d2b;font-family:var(--mono);font-size:12px}
@@ -27,36 +36,104 @@
   input{flex:1;min-width:260px;font-family:var(--mono)}
   button{cursor:pointer}
   button:hover{border-color:var(--accent);color:var(--accent)}
-  #records{max-height:300px;overflow:auto}
+  #records,#tape{max-height:300px;overflow:auto}
+  #tape td{border-bottom:1px solid #161d2b;font-size:12px}
   .cmd{background:#0d1420;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-family:var(--mono);font-size:12px;color:var(--ok);margin-top:10px;display:none;cursor:pointer;white-space:pre-wrap}
   .tag{display:inline-block;padding:1px 7px;border-radius:5px;font-size:11px;font-family:var(--mono)}
   .t2xx{background:#123527;color:var(--ok)}.t4xx{background:#3a3115;color:var(--warn)}.t5xx{background:#3a1a1a;color:var(--bad)}.tinf{background:#152a3a;color:var(--accent)}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  .chip{font-size:11px;font-family:var(--mono);border:1px solid var(--line);border-radius:6px;padding:2px 8px;color:var(--dim)}
+  .chip.hot{color:var(--ok);border-color:#1f4a36}
+  .chip.alm{color:var(--warn);border-color:#5a4515}
+  #tapeCard h2{display:flex;justify-content:space-between;align-items:center}
+  .tape-ev{display:flex;gap:10px;padding:3px 0;font-size:12.5px;border-bottom:1px solid #161d2b}
+  .tape-ev .t{color:var(--dim);font-family:var(--mono);flex-shrink:0;width:70px}
+  .tape-ev .m{flex:1}
+  .tape-ev.alm .m{color:var(--warn)}.tape-ev.bad .m{color:var(--bad)}.tape-ev.ok .m{color:var(--ok)}
+  #banner{display:none;background:#3a1a1a;border:1px solid #7a2f2f;color:#f0b9b9;padding:10px 14px;border-radius:10px;margin-bottom:14px;font-size:13px}
+  kbd{font-family:var(--mono);background:#0d1420;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;font-size:12px}
+  #help{display:none;position:fixed;inset:0;background:rgba(4,7,12,.75);z-index:10;align-items:center;justify-content:center}
+  #help .box{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 24px;max-width:560px;width:92%}
+  table.apiref td:first-child{color:var(--ok)}
 </style>
 </head>
 <body>
-<h1>▣ BLACKBOX <span class="acc">omni-sidecar</span></h1>
-<div class="sub" id="uptime">self-healing · finops · deterministic replay — admin v1.0</div>
+<h1>▣ BLACKBOX <span class="acc">omni-sidecar</span> <span class="pill acc" id="ver">–</span></h1>
+<div class="sub" id="uptime">self-healing · finops · deterministic replay — admin v2.0</div>
+<div id="banner" role="alert">connection lost to the admin API — retrying…</div>
 
 <div class="grid">
   <div class="card">
     <h2>Ingress Shield</h2>
     <div class="big" id="rps">0 <span style="font-size:13px;color:var(--dim)">req/s</span></div>
+    <svg class="spark" id="rpsSpark" preserveAspectRatio="none" aria-hidden="true"></svg>
     <div class="kv"><span>total requests</span><span id="reqTotal">–</span></div>
+    <div class="mix" id="statusMix"><i style="background:#2e6b4b;width:100%"></i></div>
+    <div class="kv"><span>2xx · 4xx · 5xx · crashes</span><span id="statusCounts">–</span></div>
     <div class="kv"><span>indexed frames</span><span id="frames">–</span></div>
     <div class="kv"><span>distinct traces</span><span id="traces">–</span></div>
-    <div class="kv"><span>sampling dropped (85%)</span><span id="sampled">–</span></div>
+    <div class="kv"><span>sampling shed (Shed85 — errors stay 100%)</span><span id="sampled">–</span></div>
     <div class="kv"><span>writer drops</span><span id="drops">–</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Guard · Scanner &amp; Rate Limit</h2>
+    <div class="big" id="guardAtt">0</div>
+    <div class="sub" style="margin:2px 0 12px">attack requests deflected by the WAF scanner</div>
+    <div class="kv"><span>scanner shield</span><span id="shield">–</span></div>
+    <div class="kv"><span>TLS termination</span><span id="tls">–</span></div>
+    <div class="kv"><span>TLS hot-reload paths</span><span id="tlsPaths" style="font-family:var(--mono);max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">–</span></div>
+    <div class="kv"><span>rate-limited (429) responses</span><span id="rateLimited">–</span></div>
+    <div class="kv"><span>configured limit</span><span id="rateCfg">–</span></div>
   </div>
 
   <div class="card">
     <h2>Supervisor · RAM watermark</h2>
     <div class="big" id="ramPct">–%</div>
     <div class="bar"><i id="ramBar" style="width:0%;background:var(--ok)"></i></div>
+    <svg class="spark" id="ramSpark" preserveAspectRatio="none" aria-hidden="true"></svg>
     <div class="kv"><span>level</span><span id="ramLevel">normal</span></div>
     <div class="kv"><span>used / budget</span><span id="ramUsed">–</span></div>
     <div class="kv"><span>process RSS</span><span id="rss">–</span></div>
-    <div class="kv"><span>disk free (data)</span><span id="disk">–</span></div>
+    <div class="kv"><span>allocator view (jemalloc)</span><span id="je">–</span></div>
     <div class="kv"><span>circuit breaker</span><span id="breaker">–</span></div>
+    <div class="kv"><span>breaker failures / transitions</span><span id="brDet">–</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Supervisor · Disk ring quota</h2>
+    <div class="big" id="diskPct">–%</div>
+    <div class="bar"><i id="diskBar" style="width:0%;background:var(--ok)"></i></div>
+    <svg class="spark" id="diskSpark" preserveAspectRatio="none" aria-hidden="true"></svg>
+    <div class="kv"><span>level</span><span id="diskLevel">normal</span></div>
+    <div class="kv"><span>data dir used / quota</span><span id="diskUsed">–</span></div>
+    <div class="kv"><span>host volume free</span><span id="diskFree">–</span></div>
+    <div class="kv"><span>survival-shed records (95%)</span><span id="diskShed">–</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Storage lifecycle</h2>
+    <div class="big" id="framesAll">– <span style="font-size:13px;color:var(--dim)">frames indexed</span></div>
+    <div class="kv"><span>active segment (bytes cap)</span><span id="segActive">–</span></div>
+    <div class="kv"><span>sealed raw segments</span><span id="sealedRaw">–</span></div>
+    <div class="kv"><span>cold .zst segments</span><span id="zst">–</span></div>
+    <div class="kv"><span>compression reclaimed</span><span id="bytesSaved" class="ok">–</span></div>
+    <div class="kv"><span>compactions</span><span id="compactions">–</span></div>
+    <div class="kv"><span>evictions (FIFO 85%)</span><span id="evictions">–</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Cold tier · bit-rot self-heal</h2>
+    <div class="big" id="heals">– <span style="font-size:13px;color:var(--dim)">heals</span></div>
+    <div class="chips">
+      <span class="chip" id="coldDest">S3/R2 not attached</span>
+      <span class="chip" id="coldCor">corruptions 0</span>
+      <span class="chip" id="coldRes">restores 0</span>
+      <span class="chip" id="coldSync">synced 0</span>
+      <span class="chip" id="coldUp">uploads 0/0 · 0 B</span>
+      <span class="chip" id="coldIdx">traces indexed 0</span>
+    </div>
+    <div class="kv"><span id="coldHint" class="dim">attach with BLACKBOX_COLD_* env to double-write segments off-box</span><span></span></div>
   </div>
 
   <div class="card">
@@ -67,23 +144,27 @@
     <div class="kv"><span>cache entries / bytes</span><span id="cacheSize">–</span></div>
     <div class="kv"><span>watermark purges</span><span id="purges">–</span></div>
     <div class="kv"><span>egress calls recorded</span><span id="recorded">–</span></div>
-    <div class="row" style="margin-top:8px"><button id="purgeBtn">Purge egress cache</button></div>
+    <div class="row" style="margin-top:8px"><button id="purgeBtn">Purge egress cache</button><button id="dumpBtn" title="copy raw /api/stats JSON">Copy stats JSON</button></div>
   </div>
 
   <div class="card">
-    <h2>Durable Queue / DLQ</h2>
-    <div class="kv"><span>pending</span><span id="qPending" class="warn">–</span></div>
+    <h2>Durable Queue</h2>
+    <div class="big" id="qBig">0 <span style="font-size:13px;color:var(--dim)">pending</span></div>
+    <svg class="spark" id="qSpark" preserveAspectRatio="none" aria-hidden="true"></svg>
     <div class="kv"><span>in flight</span><span id="qFlight">–</span></div>
     <div class="kv"><span>dead letter</span><span id="qDlq" class="bad">–</span></div>
     <div class="kv"><span>delivered (lifetime)</span><span id="qOk" class="ok">–</span></div>
+    <div class="kv"><span>enqueued</span><span id="qEnq">–</span></div>
     <div class="kv"><span>deduped / reaped</span><span id="qMisc">–</span></div>
+    <div class="kv"><span>dead-lettered (lifetime)</span><span id="qDlTot">–</span></div>
+    <div class="kv"><span>idempotency keys swept</span><span id="qIdem">–</span></div>
   </div>
 </div>
 
 <div class="card" style="margin-top:14px">
   <h2>Trace Inspector — 1-click replay</h2>
   <div class="row" style="margin-top:0">
-    <input id="tid" placeholder="32-hex trace id (x-blackbox-trace-id response header)">
+    <input id="tid" placeholder="32-hex trace id (x-blackbox-trace-id response header) — press t to focus, ? for help" autocomplete="off" spellcheck="false">
     <button id="traceBtn">Inspect</button>
   </div>
   <div class="cmd" id="cmd" title="click to copy"></div>
@@ -96,74 +177,267 @@
   <tbody id="finops"></tbody></table>
 </div>
 
-<script>
-let lastReq = null, lastT = null;
-const $ = id => document.getElementById(id);
-const fmt = b => b>1e9?(b/1e9).toFixed(1)+' GB':b>1e6?(b/1e6).toFixed(1)+' MB':b>1e3?(b/1e3).toFixed(1)+' KB':b+' B';
-const usd = m => '$'+(m/1e6).toFixed(4);
+<div class="card" style="margin-top:14px" id="tapeCard">
+  <h2><span>Flight Tape — recent events (derived live from polling deltas)</span><span class="pill" title="client-side derived; not a substitute for the audit chain">derived</span></h2>
+  <div id="tape"><div class="dim" style="font-size:12.5px">watching for state changes, compactions, heals, breaker transitions, DLQ arrivals and shield activity…</div></div>
+</div>
 
+<div class="card" style="margin-top:14px">
+  <h2>API surface</h2>
+  <table class="apiref">
+    <tr><td>GET /api/stats</td><td>full node snapshot (this dashboard renders it)</td></tr>
+    <tr><td>GET /api/finops</td><td>tenant (provider, model) ledger rows</td></tr>
+    <tr><td>GET /api/queue</td><td>durable queue + DLQ counters</td></tr>
+    <tr><td>GET /api/trace/{32-hex}</td><td>trace records + deterministic replay command</td></tr>
+    <tr><td>POST /api/egress/purge</td><td>flush the entire egress cache (manual)</td></tr>
+    <tr><td>headers</td><td>set BLACKBOX_ADMIN_TOKEN to require x-admin-token; bind admin to localhost</td></tr>
+  </table>
+  <div class="sub" style="margin-top:10px">shortcuts: <kbd>t</kbd> trace inspector · <kbd>?</kbd> help · <kbd>Esc</kbd> close</div>
+</div>
+
+<div id="help"><div class="box">
+  <h2 style="color:var(--fg);font-size:14px;margin-bottom:10px">Admin console help</h2>
+  <div class="kv"><span>trace inspector</span><span><kbd>t</kbd></span></div>
+  <div class="kv"><span>this help</span><span><kbd>?</kbd></span></div>
+  <div class="kv"><span>close dialogs</span><span><kbd>Esc</kbd></span></div>
+  <div class="sub" style="margin-top:12px">The console fully renders the node snapshot the server already exposes: RAM + disk watermarks, guard counters, storage lifecycle, the cold-tier self-heal story and the queue engine. The Flight Tape is derived client-side from polling deltas — it complements, never replaces, the tamper-evident audit chain.</div>
+</div></div>
+
+<script>
+let lastReq = null, lastT = null, lastS = null, ok = true;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const fmt = b => b>=1099511627776?(b/1099511627776).toFixed(2)+' TB':b>=1048576?(b/1048576).toFixed(1)+' MB':b>=1024?(b/1024).toFixed(1)+' KB':Math.round(b)+' B';
+const usd = m => '$'+(m/1e6).toFixed(4);
+const num = n => n===undefined?'–':Number(n).toLocaleString();
+
+/* ---- sparkline engine: ring buffers -> inline SVG polyline (no dependencies) ---- */
+const R = {};                        // metric name -> {data:[], max:90}
+function ring(name, v){
+  const r = R[name] || (R[name] = {data: [], max: 90});
+  r.data.push(v); if(r.data.length > r.max) r.data.shift();
+}
+function spark(id, values, color){
+  const el = $(id); if(!el) return;
+  const W = 280, H = 40, n = values.length;
+  if(n < 2){ el.innerHTML = ''; return; }
+  const hi = Math.max(...values), lo = Math.min(...values);
+  const span = (hi - lo) || 1;
+  const px = i => i/(n-1)*W, py = v => H-4 - (v-lo)/span*(H-10) + 2;
+  const pts = values.map((v,i)=>px(i).toFixed(1)+','+py(v).toFixed(1)).join(' ');
+  const gid = 'g'+id;
+  el.innerHTML =
+    `<defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">`+
+    `<stop offset="0" stop-color="${color}" stop-opacity=".28"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>`+
+    `<polyline fill="none" stroke="${color}" stroke-width="1.6" points="${pts}"/>`+
+    `<polyline fill="url(#${gid})" stroke="none" points="${pts} ${W},${H} 0,${H}"/>`;
+}
+
+/* ---- flight tape: derived client-side from poll diffs ---- */
+const tape = [];
+function noteEvent(cls, msg){
+  const t = new Date().toTimeString().slice(0,8);
+  tape.unshift({t, cls, msg});
+  if(tape.length > 100) tape.pop();
+  const el = $('tape');
+  el.innerHTML = tape.map(e =>
+    `<div class="tape-ev ${e.cls}"><span class="t">${e.t}</span><span class="m">${esc(e.msg)}</span></div>`).join('');
+}
+const LABELS = {alm:'WARN', bad:'FAIL', ok:'OK', '':'INFO'};
+
+function digest(s){
+  const c = [];
+  const st = s.storage || {};
+  c.push('compactions ' + (st.compactions ?? 0), 'evictions ' + (st.evictions ?? 0),
+         'sampled ' + (s.ingress?.sampled_out ?? 0), 'dropped ' + (s.ingress?.dropped ?? 0),
+         'brk ' + (s.breaker?.state ?? ''), 'brktr ' + (s.breaker?.transitions ?? 0),
+         'ram ' + (s.ram?.level ?? ''), 'disk ' + (s.disk?.level ?? ''),
+         'waf ' + (s.guard?.blocked_attacks ?? 0), '429 ' + (s.guard?.rate_limited ?? 0),
+         'dlq ' + (s.queue?.dead_letter ?? 0), 'heal ' + (s.cold?.heals ?? 0),
+         'corr ' + (s.cold?.corrupt_detected ?? 0), 'uplds ' + (s.cold?.uploads ?? 0));
+  return c.join('|');
+}
+
+/* ---- main poll ---- */
 async function poll(){
+  let s;
   try{
-    const s = await (await fetch('/api/stats')).json();
+    s = await (await fetch('/api/stats')).json();
+    if(!ok){ ok = true; $('banner').style.display='none'; lastS = null; }
+  }catch(e){
+    if(ok){ ok = false; $('banner').style.display='block'; noteEvent('bad','connection to admin API lost'); }
+    return;
+  }
+  try{
     const t = performance.now();
     if(lastReq !== null){
       const dt = (t - lastT)/1000;
-      $('rps').innerHTML = Math.round((s.ingress.total_requests - lastReq)/dt) + ' <span style="font-size:13px;color:var(--dim)">req/s</span>';
+      const rps = Math.max(0, (s.ingress.total_requests - lastReq)/dt);
+      $('rps').innerHTML = Math.round(rps) + ' <span style="font-size:13px;color:var(--dim)">req/s</span>';
+      ring('rps', rps);
+      spark('rpsSpark', R.rps.data, '#5aa7ff');
     }
     lastReq = s.ingress.total_requests; lastT = t;
-    $('reqTotal').textContent = s.ingress.total_requests.toLocaleString();
-    $('frames').textContent = s.ingress.frames.toLocaleString();
-    $('traces').textContent = s.ingress.distinct_traces.toLocaleString();
-    $('sampled').textContent = s.ingress.sampled_out.toLocaleString();
-    $('drops').textContent = s.ingress.dropped.toLocaleString();
-    $('uptime').textContent = `uptime ${Math.floor(s.uptime_secs/60)}m ${Math.floor(s.uptime_secs%60)}s · self-healing · finops · deterministic replay`;
+    $('ver').textContent = s.version || 'blackbox';
+    $('reqTotal').textContent = num(s.ingress.total_requests);
+    $('frames').textContent = num(s.ingress.frames);
+    $('traces').textContent = num(s.ingress.distinct_traces);
+    $('sampled').textContent = num(s.ingress.sampled_out);
+    $('drops').textContent = num(s.ingress.dropped);
+    const t2 = s.ingress.status_2xx ?? 0, t4 = s.ingress.status_4xx ?? 0, t5 = s.ingress.status_5xx ?? 0;
+    const tt = Math.max(1, t2+t4+t5);
+    $('statusMix').innerHTML =
+       `<i style="width:${100*t2/tt}%;background:#2e6b4b" title="2xx: ${t2}"></i>`+
+       `<i style="width:${100*t4/tt}%;background:#8a6d1f" title="4xx: ${t4}"></i>`+
+       `<i style="width:${100*t5/tt}%;background:#8a3039" title="5xx: ${t5}"></i>`;
+    $('statusCounts').textContent = `${num(t2)} · ${num(t4)} · ${num(t5)} · ${num(s.ingress.sentry_crashes)}`;
+    $('uptime').textContent = `uptime ${Math.floor(s.uptime_secs/3600)}h ${Math.floor(s.uptime_secs%3600/60)}m ${s.uptime_secs%60}s · self-healing · finops · deterministic replay — admin v2.0`;
 
-    $('ramPct').textContent = s.ram.pct.toFixed(0)+'%';
+    const g = s.guard || {};
+    $('guardAtt').innerHTML = num(g.blocked_attacks) + ' <span style="font-size:13px;color:var(--dim)">deflected</span>';
+    $('shield').textContent = g.shield ? 'on' : 'off';
+    $('shield').className = g.shield ? 'ok' : 'dim';
+    $('tls').textContent = g.tls ? 'terminating' : 'plain http';
+    $('tls').className = g.tls ? 'ok' : 'dim';
+    $('tlsPaths').textContent = g.tls && g.tls_reload_paths ? `${g.tls_reload_paths.cert} ↔ ${g.tls_reload_paths.key}` : '–';
+    $('rateLimited').textContent = num(g.rate_limited);
+    $('rateCfg').textContent = g.rate_rps_milli ? (g.rate_rps_milli/1000).toString() + ' rps · burst ' + g.rate_burst : 'unlimited';
+
+    $('ramPct').textContent = s.ram.pct.toFixed(1)+'%';
     const bar = $('ramBar'); bar.style.width = Math.min(s.ram.pct,100)+'%';
     bar.style.background = s.ram.pct>=85?'var(--bad)':s.ram.pct>=75?'var(--warn)':'var(--ok)';
     $('ramLevel').textContent = s.ram.level;
     $('ramUsed').textContent = fmt(s.ram.used)+' / '+fmt(s.ram.budget);
     $('rss').textContent = fmt(s.ram.rss);
-    $('disk').textContent = fmt(s.disk.available);
-    $('breaker').textContent = s.breaker.state + (s.breaker.open_for_ms>0?` (${s.breaker.open_for_ms}ms)`:'');
-    $('breaker').className = s.breaker.state==='closed'?'ok':'bad';
+    $('je').textContent = fmt(s.ram.jemalloc);
+    ring('ram', s.ram.pct); spark('ramSpark', R.ram.data, s.ram.pct>=75?'#e0a83a':'#3fb27f');
+    const b = s.breaker;
+    $('breaker').textContent = b.state + (b.open_for_ms>0?` (${b.open_for_ms}ms)`:'');
+    $('breaker').className = b.state==='closed'?'ok':'bad';
+    $('brDet').textContent = `${b.failures} / ${b.transitions}`;
+
+    const d = s.disk;
+    $('diskPct').textContent = d.pct.toFixed(1)+'%';
+    const dbar = $('diskBar'); dbar.style.width = Math.min(d.pct,100)+'%';
+    dbar.style.background = d.pct>=95?'var(--bad)':d.pct>=85?'var(--warn)':'var(--ok)';
+    $('diskLevel').textContent = d.level;
+    $('diskUsed').textContent = fmt(d.used)+' / '+fmt(d.quota);
+    $('diskFree').textContent = fmt(d.available);
+    $('diskShed').textContent = num(s.storage?.disk_shed_out ?? 0);
+    ring('disk', d.pct); spark('diskSpark', R.disk.data, d.pct>=85?'#e0a83a':'#5aa7ff');
+
+    const st = s.storage || {};
+    $('framesAll').innerHTML = num(st.frames_indexed) + ' <span style="font-size:13px;color:var(--dim)">frames indexed</span>';
+    $('segActive').textContent = `#${st.active_segment ?? '–'} / ${st.max_segment_bytes ? fmt(st.max_segment_bytes) : '–'}`;
+    $('sealedRaw').textContent = st.sealed_raw_segments ? `${st.sealed_raw_segments} · ${fmt(st.sealed_raw_bytes)}` : '0';
+    $('zst').textContent = st.cold_zst_segments ? `${st.cold_zst_segments} · ${fmt(st.cold_zst_bytes)}` : '0';
+    $('bytesSaved').textContent = st.bytes_saved ? fmt(st.bytes_saved) : '0 B';
+    $('compactions').textContent = num(st.compactions);
+    $('evictions').textContent = num(st.evictions);
+
+    const c = s.cold;
+    if(c && c.enabled){
+      $('coldDest').textContent = `${c.bucket} @ ${c.endpoint}`;
+      $('coldDest').classList.add('hot');
+      $('coldHint').textContent = 'double-writing segments to the cold bucket; digest-verified replicas serve heals';
+      $('coldCor').textContent = 'corruptions ' + c.corrupt_detected;
+      $('coldRes').textContent = 'restores ' + c.restores;
+      $('coldSync').textContent = 'synced ' + c.synced_segments;
+      $('coldUp').textContent = `uploads ${c.uploads}/${c.upload_failures} · ${fmt(c.bytes_uploaded)}`;
+      $('coldIdx').textContent = 'traces indexed ' + c.traces_indexed;
+    }
 
     const eg = s.egress;
-    $('saved').innerHTML = usd(eg.cost_micros_saved) + ' <span style="font-size:13px;color:var(--dim)">saved</span>';
+    $('saved').innerHTML = usd(eg.cost_micros_saved||0) + ' <span style="font-size:13px;color:var(--dim)">saved</span>';
     const served = eg.ledger.total_requests||0, svd = (eg.ledger.cache_hits||0)+(eg.ledger.coalesced_hits||0);
     $('hitRate').textContent = served? (100*svd/served).toFixed(1)+'%' : '–';
-    $('hits').textContent = `${eg.ledger.cache_hits||0} / ${eg.ledger.coalesced_hits||0}`;
-    $('cacheSize').textContent = `${eg.cache.entries} / ${fmt(eg.cache.bytes)}`;
-    $('purges').textContent = eg.cache.purges + (eg.cache.last_purge_reason?` (${eg.cache.last_purge_reason})`:'');
-    $('recorded').textContent = (eg.recorded||0).toLocaleString();
+    $('hits').textContent = `${num(eg.ledger.cache_hits)} / ${num(eg.ledger.coalesced_hits)}`;
+    $('cacheSize').textContent = `${num(eg.cache.entries)} / ${fmt(eg.cache.bytes)}`;
+    $('purges').textContent = num(eg.cache.purges) + (eg.cache.last_purge_reason?` (${eg.cache.last_purge_reason})`:'');
+    $('recorded').textContent = num(eg.recorded);
 
-    $('qPending').textContent = s.queue.pending;
-    $('qFlight').textContent = s.queue.in_flight;
-    $('qDlq').textContent = s.queue.dead_letter;
-    $('qOk').textContent = s.queue.delivered_total;
-    $('qMisc').textContent = `${s.queue.deduped_total} / ${s.queue.reaped_total}`;
+    const q = s.queue;
+    $('qBig').innerHTML = num(q.pending) + ' <span style="font-size:13px;color:var(--dim)">pending</span>';
+    $('qFlight').textContent = num(q.in_flight);
+    $('qDlq').textContent = num(q.dead_letter);
+    $('qOk').textContent = num(q.delivered_total);
+    $('qEnq').textContent = num(q.enqueued_total);
+    $('qMisc').textContent = `${num(q.deduped_total)} / ${num(q.reaped_total)}`;
+    $('qDlTot').textContent = num(q.deadletted_total);
+    $('qIdem').textContent = num(q.idem_swept_total);
+    ring('q', q.in_flight + q.pending); spark('qSpark', R.q.data, '#e0a83a');
+
+    /* flight tape diffs (vs previous snapshot) */
+    if(lastS){
+      const L = {alm:'WARN', bad:'FAIL', ok:'OK', info:''};
+      const was = lastS, now = s;
+      const cmp = (f, m, cls) => { const a=f(was), b=f(now); if(b>a) noteEvent(cls??'', m(b-a)); };
+      cmp(x=>x.storage?.compactions??0,  n=>`compaction completed — reclaimed snapshot delta +${n}`);
+      cmp(x=>x.storage?.evictions??0,    n=>`disk ring: ${n} cold segment(s) evicted (85% FIFO)`);
+      cmp(x=>x.ingress?.sampled_out??0,  n=>`Shed85 head-sampling shed ${n} healthy record(s) — errors/slow stay at 100%`, 'alm');
+      cmp(x=>x.ingress?.dropped??0,      n=>`writer dropped ${n} record(s)`, 'bad');
+      cmp(x=>x.guard?.blocked_attacks??0,n=>`WAF deflected ${n} attack request(s)`, 'ok');
+      cmp(x=>x.guard?.rate_limited??0,   n=>`${n} request(s) rate-limited (429)`);
+      cmp(x=>x.queue?.dead_letter??0,    n=>`${n} job(s) hit the dead-letter queue`, 'bad');
+      cmp(x=>x.cold?.heals??0,           n=>`bit-rot self-heal: ${n} segment(s) restored from the cold tier`, 'ok');
+      cmp(x=>x.cold?.corrupt_detected??0,n=>`bit-rot detected in ${n} segment(s) — healing scheduled`, 'alm');
+      cmp(x=>x.cold?.uploads??0,         n=>`${n} segment upload(s) completed to the cold tier`);
+      cmp(x=>x.egress?.cache?.purges??0, n=>`egress cache purged (${n})`);
+      if(was.breaker?.state !== now.breaker?.state)
+        noteEvent(now.breaker?.state==='closed'?'ok':'alm', `circuit breaker transition: ${was.breaker?.state} → ${now.breaker?.state}`);
+      if(was.ram?.level !== now.ram?.level)
+        noteEvent(now.ram?.level!=='Normal'?'alm':'ok', `RAM level: ${was.ram?.level} → ${now.ram?.level}`);
+      if(was.disk?.level !== now.disk?.level)
+        noteEvent(now.disk?.level!=='Normal'?'alm':'ok', `disk level: ${was.disk?.level} → ${now.disk?.level}`);
+    }
+    lastS = s;
 
     const f = await (await fetch('/api/finops')).json();
-    $('finops').innerHTML = f.rows.map(r=>{
-      const pct = r.savings_pct.toFixed(1)+'%';
-      return `<tr><td>${r.tenant}</td><td>${r.provider}</td><td>${r.model}</td><td>${r.total_requests}</td><td>${r.cache_hits}</td><td>${r.coalesced_hits}</td><td>${r.tokens_used}</td><td class="ok">${r.tokens_saved}</td><td>${usd(r.cost_micros_spent)}</td><td class="ok">${usd(r.cost_micros_saved)}</td><td class="${r.savings_pct>50?'ok':''}">${pct}</td></tr>`;
-    }).join('') || '<tr><td colspan="11" style="color:var(--dim)">no egress traffic yet — set OPENAI_BASE_URL / ANTHROPIC_BASE_URL to this listener</td></tr>';
+    $('finops').innerHTML = f.rows.map(r=>`
+      <tr><td>${esc(r.tenant)}</td><td>${esc(r.provider)}</td><td>${esc(r.model)}</td>
+      <td>${r.total_requests}</td><td>${r.cache_hits}</td><td>${r.coalesced_hits}</td>
+      <td>${r.tokens_used}</td><td class="ok">${r.tokens_saved}</td>
+      <td>${usd(r.cost_micros_spent)}</td><td class="ok">${usd(r.cost_micros_saved)}</td>
+      <td class="${r.savings_pct>50?'ok':''}">${r.savings_pct.toFixed(1)}%</td></tr>`).join('') ||
+      '<tr><td colspan="11" style="color:var(--dim)">no egress traffic yet — set OPENAI_BASE_URL / ANTHROPIC_BASE_URL to this listener</td></tr>';
   }catch(e){ console.error(e); }
 }
 
+/* ---- trace inspector ---- */
 async function inspect(){
-  const id = $('tid').value.trim();
-  if(!/^[0-9a-fA-F]{32}$/.test(id)){ alert('trace id must be 32 hex chars'); return; }
-  const r = await (await fetch('/api/trace/'+id)).json();
-  if(r.error){ $('records').innerHTML = `<div style="color:var(--bad);margin-top:8px">${r.error}</div>`; $('cmd').style.display='none'; return; }
+  const raw = $('tid').value.trim().replace(/^0x/,'').toLowerCase();
+  if(!/^[0-9a-fA-F]{32}$/.test(raw)){ alert('trace id must be 32 hex chars'); return; }
+  $('tid').value = raw;
+  const r = await (await fetch('/api/trace/'+raw)).json();
+  if(r.error){ $('records').innerHTML = `<div style="color:var(--bad);margin-top:8px">${esc(r.error)}</div>`; $('cmd').style.display='none'; return; }
   $('cmd').textContent = r.replay_command; $('cmd').style.display='block';
   $('records').innerHTML = '<table><thead><tr><th>seq</th><th>kind</th><th>status</th><th>detail</th><th>segment:offset</th></tr></thead><tbody>'+
-    r.records.map(x=>`<tr><td>${x.seq_no}</td><td><span class="tag ${x.cls}">${x.kind}</span></td><td>${x.status??''}</td><td>${x.detail}</td><td>${x.at}</td></tr>`).join('')+'</tbody></table>';
+    r.records.map(x=>`<tr><td>${x.seq_no}</td><td><span class="tag ${x.cls||''}">${esc(x.kind)}</span></td><td>${x.status??''}</td><td>${esc(x.detail)}</td><td>${x.at}</td></tr>`).join('')+'</tbody></table>';
+  noteEvent('info', `trace ${raw.slice(0,12)}… inspected — ${r.records.length} record(s), replay command ready`);
 }
+
 $('traceBtn').onclick = inspect;
 $('tid').addEventListener('keydown', e=>{ if(e.key==='Enter') inspect(); });
 $('cmd').onclick = () => navigator.clipboard.writeText($('cmd').textContent);
-$('purgeBtn').onclick = async () => { await fetch('/api/egress/purge',{method:'POST'}); poll(); };
+$('purgeBtn').onclick = async () => {
+  if(!confirm('Purge the ENTIRE egress cache?')) return;
+  const r = await fetch('/api/egress/purge',{method:'POST'});
+  const j = await r.json();
+  noteEvent('alm', `manual purge: ${j.purged ?? '?'} cache entr(ies) flushed`);
+  poll();
+};
+$('dumpBtn').onclick = async () => {
+  try{ navigator.clipboard.writeText(JSON.stringify(lastS, null, 2)); noteEvent('info','raw /api/stats snapshot copied to clipboard'); }
+  catch(e){ noteEvent('alm','clipboard unavailable'); }
+};
+document.addEventListener('keydown', e => {
+  if(e.key==='Escape'){ $('help').style.display='none'; return; }
+  const inField = /INPUT|TEXTAREA/.test(document.activeElement.tagName);
+  if(inField) return;
+  if(e.key==='t'){ e.preventDefault(); $('tid').focus(); }
+  if(e.key==='?'){ e.preventDefault(); $('help').style.display='block'; }
+});
+$('help').onclick = () => $('help').style.display='none';
 poll(); setInterval(poll, 1000);
 </script>
 </body>

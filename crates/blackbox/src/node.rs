@@ -503,6 +503,8 @@ pub mod admin {
         use blackbox_supervisor::memory::{jemalloc_allocated_bytes, rss_bytes, used_bytes};
         use blackbox_supervisor::disk;
 
+        let version = concat!("v", env!("CARGO_PKG_VERSION"));
+
         let idx = state.proxy.stats();
         let used = used_bytes();
         let level = blackbox_supervisor::memory::current_ram_level();
@@ -578,6 +580,7 @@ pub mod admin {
         };
 
         serde_json::json!({
+            "version": version,
             "uptime_secs": state.started.elapsed().as_secs(),
             "ingress": {
                 "total_requests": state.proxy.total_requests(),
