@@ -10,6 +10,8 @@
 
 # Project Blackbox — the Rust Omni-Sidecar
 
+Authored by **Dr.wolfic** — maintained by **fowzanasoftsolution**.
+
 **One ~17 MB static binary that replaces four layers of infrastructure** — Sentry,
 Temporal+Redis, NGINX and your egress cache — by living inside your app's process
 space on a $5 VPS (2 cores / 4 GB) and recording *everything* with zero code
@@ -537,4 +539,5 @@ discipline. Do not open public issues for security reports.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](LICENSE). Copyright © 2026
+**Dr.wolfic** (fowzanasoftsolution).
