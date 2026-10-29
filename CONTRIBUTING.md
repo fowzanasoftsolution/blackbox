@@ -37,7 +37,7 @@ Requirements: Linux (or a Linux container), Rust stable, `libzstd-dev`.
 
 ```bash
 cargo build --workspace --release
-cargo test  --workspace --release    # 201 tests
+cargo test  --workspace --release    # 217 tests
 ./target/release/blackbox demo --once   # 4-engine smoke gate, exit 0 expected
 ```
 

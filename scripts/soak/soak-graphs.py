@@ -4,10 +4,9 @@
 Usage:
     python scripts/soak/soak-graphs.py RUN1_RAW RUN2_RAW [--out DIR]
 
-    RUN1_RAW  raw/ directory of the failing run-1 evidence
-              (default: D:\\FSS\\oni\\blackbox-soak-30m\\v1.1.2-2026-10-27\\raw)
-    RUN2_RAW  raw/ directory of the passing re-verification run
-              (default: D:\\FSS\\oni\\blackbox-soak-30m\\v1.1.2b-2026-10-28\\raw)
+    RUN1_RAW  raw/ directory of the failing run-1 evidence (required; the
+              dated evidence directory is kept outside this repository)
+    RUN2_RAW  raw/ directory of the passing re-verification run (required)
     --out     output directory, default <repo>/docs/soak
 
 Reads samples.jsonl (kernel-VmRSS samples, ~10 s cadence) from each evidence
@@ -25,8 +24,6 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-DEFAULT_RUN1 = Path(r"D:\FSS\oni\blackbox-soak-30m\v1.1.2-2026-10-27\raw")
-DEFAULT_RUN2 = Path(r"D:\FSS\oni\blackbox-soak-30m\v1.1.2b-2026-10-28\raw")
 
 # Supervisor watermark facts (48 MiB budget): Warn75 = 36 MiB, Shed85 = 40.8,
 # v1.1.2 PASS target = 45 MiB. Order: value, label, dash pattern, color.
@@ -214,8 +211,12 @@ def comparison_chart(run1, run2):
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    run1_dir = Path(args[0]) if len(args) > 0 else DEFAULT_RUN1
-    run2_dir = Path(args[1]) if len(args) > 1 else DEFAULT_RUN2
+    if len(args) < 2:
+        sys.exit("usage: soak-graphs.py RUN1_RAW RUN2_RAW [--out DIR]\n"
+                 "both raw evidence directories are required; they live in the "
+                 "dated soak report directories outside this repository")
+    run1_dir = Path(args[0])
+    run2_dir = Path(args[1])
     out_dir = Path(args[2]) if len(args) > 2 else REPO / "docs" / "soak"
     out_dir.mkdir(parents=True, exist_ok=True)
 
