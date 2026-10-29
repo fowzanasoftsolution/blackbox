@@ -10,7 +10,7 @@
 
 # Project Blackbox — the Rust Omni-Sidecar
 
-**One <16 MB static binary that replaces four layers of infrastructure** — Sentry,
+**One ~17 MB static binary that replaces four layers of infrastructure** — Sentry,
 Temporal+Redis, NGINX and your egress cache — by living inside your app's process
 space on a $5 VPS (2 cores / 4 GB) and recording *everything* with zero code
 changes.
@@ -234,7 +234,12 @@ disk ring quota compresses at 75 %, FIFO-evicts cold segments at 85 % (crash
 and 5xx segments stay **pinned** locally), and sheds healthy telemetry at 95 %
 while crashes/queue jobs survive at 100 %. Bit-rot is **self-healing**: a
 CRC/decompress failure on read transparently pulls the digest-verified
-replica from the cold tier and atomically replaces the damaged file.
+replica from the cold tier and atomically replaces the damaged file. v1.1.3
+completes the trigger: a RAW segment keeps its torn-tail skip contract
+(kill -9 mid-append is legitimate), but an unreadable frame inside a SEALED
+`.zst` — the product of a completed, fsync'd seal — surfaces as
+`StorageError::Corrupt`, so the heal actually fires instead of silently
+skipping the segment forever.
 
 ## The Pro differentiators (v1.1)
 
@@ -433,7 +438,7 @@ CMD ["blackbox", "run", "--listen", "0.0.0.0:8080", "--data", "/data", "--", "/s
 Gate sources live in `crates/*/src/gates_phase<n>.rs` and
 `crates/*/tests/phase<n>_gates.rs` — every gate is also a CI test. Run any
 gate directly: `blackbox p1..p7-gate <n>`, or the whole battery:
-`cargo test --workspace --release` (216 tests) + `blackbox demo --once`.
+`cargo test --workspace --release` (217 tests) + `blackbox demo --once`.
 
 | Phase | Gate | Measured result |
 |---|---|---|
