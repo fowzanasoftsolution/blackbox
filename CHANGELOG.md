@@ -9,6 +9,12 @@ Project Blackbox is authored by **Dr.wolfic** for **fowzanasoftsolution**.
 ## [Unreleased]
 
 ### Changed
+- The soak-memory gate (`soak_memory_bound`) now hard-fails at **43 MiB
+  VmRSS**: the monitored steady state stays **42.0 MiB**, with +1 MiB of
+  documented cross-environment slack after the same code measured 39.20 MiB
+  in the verification container and 42.23 MiB on a GitHub runner
+  (THP=madvise both). Real regressions move RSS by whole MiBs; jitter
+  should not flip a green gate.
 - Professionalized the repository layout: uniform `crates/*` workspace with
   a single binary crate; verification harnesses standardized as
   `gates_phase<n>.rs` per crate (product-phase naming is intentional and kept

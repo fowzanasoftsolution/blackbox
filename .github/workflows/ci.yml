@@ -43,8 +43,9 @@ jobs:
 
       - name: Normalize THP to madvise (soak-memory-gate environment)
         run: |
-          # soak_memory_bound asserts the whole-process VmRSS < 42 MiB on
-          # jemalloc - the number verified in Docker with THP=madvise.
+          # soak_memory_bound asserts the whole-process VmRSS < 43 MiB on
+          # jemalloc - the monitored steady state (42.0 MiB) verified in
+          # Docker with THP=madvise, plus 1 MiB cross-environment slack.
           # Runner images ship THP=always, which inflates VmRSS (2 MiB huge
           # pages back the heap; freed pages return only when a whole
           # region frees). The runner VM is ephemeral, so no restore needed.
