@@ -1,0 +1,9 @@
+[book]
+title = "Project Blackbox — the Rust Omni-Sidecar"
+authors = ["Dr.wolfic", "fowzanasoftsolution"]
+src = "src"
+description = "One ~17 MB static binary that replaces four layers of infrastructure — Sentry, Temporal+Redis, NGINX and the egress cache — with zero code changes."
+
+[output.html]
+git-repository-url = "https://github.com/fowzanasoftsolution/blackbox"
+edit-url-template = "https://github.com/fowzanasoftsolution/blackbox/edit/main/docs-src/{path}"

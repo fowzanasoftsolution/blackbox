@@ -1,0 +1,66 @@
+name: Pages
+
+# Build the docs (mdBook) + assemble the static site, then deploy to GitHub
+# Pages. The deploy job is gated on repository visibility: Pages is free for
+# public repos, so while the repo is private the workflow stays green and
+# skips deploy; the moment the repo goes public (or the workflow is re-run
+# after that), the site publishes.
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "docs-src/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    outputs:
+      public: ${{ steps.v.outputs.pub }}
+    steps:
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "pub=$(gh api repos/${{ github.repository }} --jq '.visibility=="public"')" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [gates]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mdBook
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook
+      - name: Build docs book
+        run: |
+          mkdir -p "$PWD/dist"
+          mdbook build docs-src -d "$PWD/dist/docs"
+      - name: Assemble site (landing + book)
+        run: |
+          mkdir -p dist
+          cp -r site/* dist/
+          echo "== dist:"; ls -la dist; echo "== dist/docs:"; ls dist/docs | head
+      - name: Upload pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: [gates, build]
+    if: needs.gates.outputs.public == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

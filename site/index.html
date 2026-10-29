@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Open the Box — Blackbox, the Rust omni-sidecar</title>
+<meta name="description" content="One ~17 MB static Rust binary that replaces four layers of infrastructure — Sentry, Temporal+Redis, NGINX, the egress cache — with zero code changes. Boot the terminal, peel the layers, read the evidence.">
+<meta property="og:title" content="Open the Box — Blackbox">
+<meta property="og:description" content="A flight recorder the size of one binary. Type into the terminal, replay a measured 4-engine boot, peel the four layers it replaces.">
+<meta property="og:type" content="website">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#open">Skip to the peel</a>
+
+<header class="top">
+  <div class="wrap">
+    <span class="brand">▣ BLACKBOX</span>
+    <nav>
+      <a href="#open">the box</a>
+      <a href="#torture">torture room</a>
+      <a href="docs/">docs</a>
+      <a href="docs/releases.html">releases</a>
+      <a href="https://github.com/fowzanasoftsolution/blackbox" rel="noopener">repo</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <!-- ================= HERO ================= -->
+  <section class="hero">
+    <div class="wrap">
+      <h1>Open <span class="thin">the</span> box<span class="caret" aria-hidden="true">_</span></h1>
+      <p class="lede">A flight recorder for your stack, packed into <b>one static Rust binary</b>.
+        It quietly replaces four layers of infrastructure. This page is an inspection console —
+        boot it, peel it, punish it. Every number is a <em>measured</em> one.</p>
+
+      <div class="badges" role="list">
+        <span class="badge" role="listitem">v1.1.3</span>
+        <span class="badge" role="listitem">17.18&nbsp;MB binary</span>
+        <span class="badge" role="listitem">217 gates green</span>
+        <span class="badge" role="listitem">Apache-2.0</span>
+        <span class="badge" role="listitem">zero deps</span>
+      </div>
+
+      <div class="term" id="term">
+        <div class="titlebar">
+          <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="ttitle">blackbox demo --once — <b>replay of a measured run</b> (linux x86_64 · v1.1.3)</span>
+        </div>
+        <div class="screen" id="screen" aria-live="polite" tabindex="0"></div>
+        <div class="prompt-row">
+          <label class="prompt" for="cmdline">$</label>
+          <input id="cmdline" name="cmdline" autocomplete="off" autocapitalize="off"
+                 spellcheck="false" aria-label="terminal command">
+        </div>
+      </div>
+      <p class="hintc">commands to try: <code>help</code> · <code>demo</code> · <code>open 2</code> ·
+        <code>trace 2b00f9a28cd80998fb91d8ab906df1f8</code> — a few are hidden. press <code>s</code> to skip the tape.</p>
+
+      <noscript><div class="noscript">The terminal needs JavaScript (it is a ~10 KB vanilla script that lints itself, no
+        network calls, no third-party code). The <a href="docs/">docs</a> work fine without it.</div></noscript>
+    </div>
+  </section>
+
+  <!-- ================= OPEN THE BOX ================= -->
+  <section id="open" class="opening">
+    <div class="wrap">
+      <h2><span class="kicker">step 01</span>Peeling the stack</h2>
+      <p class="sub">Your infra used to be four products and a duct-taped day of glue. Scroll —
+        each layer peels off the box and lands on the left, stamped with the gate that proves it.</p>
+
+      <ol class="layers">
+        <li class="layer" id="l1">
+          <div class="l-face">
+            <div class="l-no">layer 1 <span>/ telemetry</span></div>
+            <h3>Sentry</h3>
+            <p>Capture every ingest frame — <code>POST /api/{project}/envelope/</code> is wire-compatible
+              with Sentry, and OTLP rides the same writer. Your instrumented SDKs don't notice the swap.</p>
+            <ul class="chips">
+              <li>PII scrubbed at capture (JSON key redaction)</li>
+              <li>errors + crashes survive every watermark at 100%</li>
+              <li>provenance: gate P1·P4 · soak 20/20 (v1.1.2c)</li>
+            </ul>
+          </div>
+        </li>
+
+        <li class="layer" id="l2">
+          <div class="l-face">
+            <div class="l-no">layer 2 <span>/ durable jobs</span></div>
+            <h3>Temporal + Redis</h3>
+            <p>Webhooks durably enqueued in 202&nbsp;ms, delivered with leases, retries, a reaper,
+              an idempotency sweep and honest DLQ accounting — one fsync'd segment file owning the state.</p>
+            <ul class="chips">
+              <li>zero-lost gate: 5,000 / 5,000 delivered · DLQ 0</li>
+              <li>connection held while your app restarts</li>
+              <li>provenance: gates P3 · phase C of the demo above</li>
+            </ul>
+          </div>
+        </li>
+
+        <li class="layer" id="l3">
+          <div class="l-face">
+            <div class="l-no">layer 3 <span>/ edge + TLS</span></div>
+            <h3>NGINX</h3>
+            <p>Reverse proxy, WAF scanner face, rate limiter, rustls TLS with hot reload. Scanner paths
+              (<code>/.env</code>, <code>/.git/*</code>, <code>wp-admin</code>, traversals) die before
+              the limiter or the writer ever see them.</p>
+            <ul class="chips">
+              <li>≥ 8,000 req/s throughput gate</li>
+              <li>429s authored by the limiter, logged per rule</li>
+              <li>provenance: gates P7 shield · P2 throughput</li>
+            </ul>
+          </div>
+        </li>
+
+        <li class="layer" id="l4">
+          <div class="l-face">
+            <div class="l-no">layer 4 <span>/ LLM spend</span></div>
+            <h3>The egress cache</h3>
+            <p>Point your app's <code>OPENAI_BASE_URL</code> at it. Singleflight collapses a burst of identical
+              calls to one upstream call; the response cache + SimHash near-cache catch the near-duplicates;
+              a ledger prices every token per tenant&nbsp;→&nbsp;provider&nbsp;→&nbsp;model.</p>
+            <ul class="chips">
+              <li>demo replay above: 24 calls → 1 upstream · 95.8% saved</li>
+              <li>1,001-variant storm caught at Hamming ≤ 3</li>
+              <li>provenance: gates P4 singleflight + SimHash · finops ledger</li>
+            </ul>
+          </div>
+        </li>
+      </ol>
+
+      <div class="reveal" id="reveal">
+        <div class="r-face">
+          <div class="l-no">what's left inside the box</div>
+          <h3>One binary. <span class="ok">Nothing else.</span></h3>
+          <p><b>17.18 MB</b> static · <b>217</b> tests green · <b>3</b>× 30-minute soaks at
+            31.82 / 28.29 MiB RSS · <b>0</b> transport errors across 267,440 soak requests ·
+            <b>0.203 s</b> crash recovery · bit-rot self-heals verified in three runs.</p>
+          <div class="cta-row">
+            <a class="btn" href="docs/getting-started.html">unbox it in 60 seconds</a>
+            <a class="btn ghost" href="docs/verification.html">read the gate matrix</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TORTURE ROOM (TEASER) ================= -->
+  <section id="torture" class="torture">
+    <div class="wrap">
+      <h2><span class="kicker">step 02</span>The Torture Room</h2>
+      <p class="sub">"Break the box. No one has succeeded." Four documented ways people attempt it —
+        each already answered by a gate. The interactive room opens in the next pass; the evidence is already here.</p>
+
+      <div class="grid2">
+        <article class="tcard">
+          <h3><code>kill -9</code> mid-append</h3>
+          <p>A real SIGKILL during frame writes. RAW segments tolerate the torn tail; the node
+            resurrects itself with its audit chain intact.</p>
+          <div class="verdict"><b>0.203 s</b> recovery · <b>0</b> records lost <span class="src">gate P5 resurrection · v1.1.2c soak</span></div>
+          <button class="punish" disabled>attempt on your own node — soon</button>
+        </article>
+
+        <article class="tcard">
+          <h3>flip bytes in a sealed segment</h3>
+          <p>Corrupt a cold <code>.zst</code>. The read path fails verification, surfaces
+            <code>Err(Corrupt)</code>, and restores the digest-verified replica from the cold tier.</p>
+          <div class="verdict"><b>self-healed</b> — visible in the demo replay, phase E <span class="src">gate P6 bit-rot heal</span></div>
+          <button class="punish" disabled>interactive corruptor — soon</button>
+        </article>
+
+        <article class="tcard">
+          <h3>flood 5,000 duplicate webhooks</h3>
+          <p>Real Stripe retries share event IDs. The dedup lane swallows the repeats while
+            every distinct event still delivers.</p>
+          <div class="verdict"><b>5,000 / 5,000</b> delivered · DLQ 0 <span class="src">gate P3 zero-lost</span></div>
+          <button class="punish" disabled>dedup flood — soon</button>
+        </article>
+
+        <article class="tcard">
+          <h3>squeeze the RSS watermark</h3>
+          <p>Push the node past <code>Shed85</code>. Head-sampling drops *healthy* records first;
+            errors, crashes and queue jobs keep flowing at 100%.</p>
+          <div class="verdict"><b>errors stay 100%</b> even at Backpressure95 <span class="src">gate P4 RAM shed</span></div>
+          <button class="punish" disabled>watermark squeeze — soon</button>
+        </article>
+      </div>
+      <p class="unlock">🔒 <b>pass 2</b> will wire these four as interactive consoles fed by recorded gate
+        captures — same honesty labels, real transcripts.</p>
+    </div>
+  </section>
+
+  <!-- ================= DOCS ================= -->
+  <section id="docs" class="docsrow">
+    <div class="wrap">
+      <h2><span class="kicker">step 03</span>Read the schematics</h2>
+      <p class="sub">Full documentation ships as an mdBook built from the same repo as the code it documents.</p>
+      <div class="dgrid">
+        <a class="dcard" href="docs/getting-started.html"><b>Getting started</b><span>install &rarr; <code>demo --once</code> &rarr; wrap your app</span></a>
+        <a class="dcard" href="docs/architecture.html"><b>Architecture</b><span>8 crates · 4 engines · watermark OS</span></a>
+        <a class="dcard" href="docs/verification.html"><b>Verification</b><span>gate matrix · 3-run soak table · THP caveat</span></a>
+        <a class="dcard" href="docs/releases.html"><b>Releases</b><span>SHA256SUMS · Ed25519 · <code>self-update</code> canary</span></a>
+        <a class="dcard" href="docs/security.html"><b>Security</b><span>reporting · exposure model · hardening</span></a>
+        <a class="dcard" href="docs/changelog.html"><b>Changelog</b><span>what each release ships and fixes</span></a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ================= FOOTER ================= -->
+<footer>
+  <div class="wrap frow">
+    <div>
+      <div class="fbrand">▣ BLACKBOX</div>
+      <p class="fattrib">by <b>Dr.wolfic</b> · shipped by <b>fowzanasoftsolution</b> · Apache-2.0</p>
+    </div>
+    <nav class="fnlinks">
+      <a href="https://github.com/fowzanasoftsolution/blackbox">repo</a>
+      <a href="docs/">docs</a>
+      <a href="https://github.com/fowzanasoftsolution/blackbox/releases">releases</a>
+      <a href="https://github.com/fowzanasoftsolution/blackbox/blob/main/SECURITY.md">security policy</a>
+    </nav>
+  </div>
+  <div class="wrap fhonest">
+    Every number on this page mirrors a measured run; gates re-run from the repo (<code>cargo test --workspace --release</code>).
+    Tapes are replays, labeled as such — nothing here is live. No third-party scripts, no cookies, no analytics.
+    · <span id="year">2026</span>
+  </div>
+</footer>
+
+<script src="console.js" defer></script>
+</body>
+</html>
