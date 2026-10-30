@@ -12,6 +12,8 @@
 
 Authored by **Dr.wolfic** — maintained by **fowzanasoftsolution**.
 
+Made in India with love 🇮🇳 ❤️
+
 **One ~17 MB static binary that replaces four layers of infrastructure** —
 Sentry, Temporal+Redis, NGINX and your egress cache — by living beside your app
 on a $5 VPS and recording *everything*, with zero code changes.
@@ -359,3 +361,15 @@ reporting only), supported versions, release-signing discipline.
 
 Apache-2.0 — see [LICENSE](LICENSE). Copyright © 2026
 **Dr.wolfic** (fowzanasoftsolution).
+
+---
+
+<div align="center">
+
+**A little coffee, a lot of love. ☕ 💛**
+
+If Blackbox makes your day a little easier, you can help fuel the next build.
+
+[![Buy me a coffee](https://img.shields.io/badge/☕_Buy_me_a_coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/zuhayfaja)
+
+</div>
