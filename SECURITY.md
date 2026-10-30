@@ -86,7 +86,7 @@ It has a documented boundary: an unanchored truncation that removes history
 *below* every exported checkpoint is reported honestly as a shorter, clean
 chain inside that truncated prefix. Export and pin the anchor
 (`blackbox audit current-anchor`) when you need truncation detection — see
-the README's [audit-chain section](README.md#the-pro-differentiators-v11).
+the README's [audit-chain section](README.md#pro-differentiators).
 
 ## Hardening defaults worth knowing
 

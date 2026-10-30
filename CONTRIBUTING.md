@@ -83,7 +83,7 @@ harnesses integrated in `cargo test`.
 | 7 | shield, TLS, demo | rate limit + scanner drop metrics, hot-reloaded TLS, `demo --once` exit 0 |
 
 The full matrix with measured numbers is in the
-[README](README.md#verification-all-measured-on-a-2-vcpu-shared-runner).
+[README](README.md#verification).
 
 When you add or change an engine: extend the phase's gate file rather than
 inventing a new folder of ad-hoc tests, keep the existing fixture contracts
