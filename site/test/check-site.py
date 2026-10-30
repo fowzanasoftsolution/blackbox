@@ -22,6 +22,11 @@ for chapter in chapters:
     assert path.is_file(), f"SUMMARY points to a missing chapter: {path}"
     assert len(path.read_text(encoding="utf-8").strip()) > 100, f"Empty / placeholder chapter: {path}"
 
+# The quickstart must use the actual public child-command syntax, not internal flags.
+quickstart = (source / "getting-started.md").read_text(encoding="utf-8")
+assert "blackbox run --upstream-port 3000 -- node server.js" in quickstart
+assert not re.search(r"blackbox run[^\n]*(--exec|--env-file)", quickstart), "Unsupported quickstart CLI flags"
+
 
 class Links(HTMLParser):
     def __init__(self):

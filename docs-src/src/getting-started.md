@@ -14,10 +14,14 @@ One line on any Linux box (x86_64 or aarch64):
 curl -fsSL https://raw.githubusercontent.com/fowzanasoftsolution/blackbox/main/scripts/install.sh | sh
 ```
 
-The installer did four things: fetched the release tarball for your
-architecture, placed `blackbox` on your `PATH`, printed the SHA-256 of both the
-archive and the unpacked binary, and dropped the release verifying key on disk
-for `blackbox self-update` to pin.
+The installer downloads the release tarball for your architecture, checks its
+archive SHA-256 when `SHA256SUMS` is available, and installs the binary to
+`/usr/local/bin` (falling back to `~/.local/bin` when needed).
+
+**Current limitation:** if the checksum file cannot be downloaded, the script
+warns and continues. It does not install the release verifying key. For strict
+manual checksum verification and key pinning, see
+[Releases & update verification](releases.md).
 
 ## 60-second smoke
 
@@ -25,7 +29,7 @@ for `blackbox self-update` to pin.
 blackbox demo --once
 ```
 
-Boots the real 4-engine node (ingress shield + TLS, durable queue, storage
+Boots the real 4-engine node (ingress shield, durable queue, storage
 writer + background compaction, egress FinOps proxy), fires a scripted burst
 through the whole stack, prints per-engine evidence — `exit 0` expected. This
 exact gate also runs in CI on every push.
@@ -37,12 +41,14 @@ process space, captures everything, watches RAM/disk watermarks and
 auto-resurrects after a crash.
 
 ```sh
-blackbox run --exec "node server.js" --env-file .env
+blackbox run --upstream-port 3000 -- node server.js
 ```
 
-The sidecar mounts itself in front of the app by injecting `OPENAI_BASE_URL`,
-`SENTRY_DSN`-style env (or `HTTP_PROXY`) — your app just talks to the
-endpoints it already knows.
+The command after `--` is your app; it must listen on the selected upstream
+port. Blackbox injects `SENTRY_DSN`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
+`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, and `BLACKBOX_EGRESS_URL` into the
+child environment. It does not inject `HTTP_PROXY` or load an `.env` file for
+you. Your app can load its own configuration as usual.
 
 ## Serve a full node yourself
 

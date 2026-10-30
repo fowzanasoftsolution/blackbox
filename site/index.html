@@ -99,7 +99,7 @@
             <h3>Temporal + Redis</h3>
             <p>Webhooks receive HTTP <code>202 Accepted</code> after a durable group-commit,
               then are delivered with leases, retries, a reaper,
-              an idempotency sweep and honest DLQ accounting — one fsync'd segment file owning the state.</p>
+              an idempotency sweep and honest DLQ accounting — a durable redb job store owning the state.</p>
             <ul class="chips">
               <li>zero-lost gate: 5,000 / 5,000 delivered · DLQ 0</li>
               <li>connection held while your app restarts</li>
@@ -199,7 +199,7 @@
           <p>Retries share event IDs. Choose how many unique IDs appear in 5,000 requests;
             a local <code>Set</code> models the dedup window. It is not the durable queue or a delivery test.</p>
           <label class="field-label" for="flood-distinct">Distinct event IDs</label>
-          <select id="flood-distinct"><option value="1">1 event, 5,000 retries</option>
+          <select id="flood-distinct"><option value="1">1 event, 5,000 attempts</option>
             <option value="100">100 events, 50 attempts each</option>
             <option value="5000">5,000 distinct events</option></select>
           <div class="verdict"><b>5,000 / 5,000 distinct webhooks</b> delivered by the real gate

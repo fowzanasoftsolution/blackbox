@@ -40,7 +40,7 @@ The supervisor watches RAM and disk and reacts at defined points:
 | Watermark | RAM reaction | Disk reaction |
 |---|---|---|
 | `Normal` | — | — |
-| `Warn75` | log + trace | — |
+| `Warn75` | egress cache + allocator purge | — |
 | `Compress75` | — | compress sealed segments |
 | `Shed85` | head-sample *healthy* 2xx telemetry (errors/slow traces stay at 100%) | FIFO-evict oldest cold `.zst` (crash + 5xx segments stay pinned) |
 | `Backpressure95` | informational tier | survival shed: queue jobs + crash evidence survive at 100% |
