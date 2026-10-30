@@ -5,7 +5,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![30-min soak](https://img.shields.io/badge/30--min%20soak-20%2F20%20PASS-brightgreen.svg)](#verification)
-![Made in India with love](docs/assets/made-in-india.svg)
+![Made in India with love](site/made-in-india.svg)
 
 </div>
 

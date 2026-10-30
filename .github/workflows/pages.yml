@@ -34,12 +34,25 @@ jobs:
   build:
     needs: [gates]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Browser algorithms + Rust parity + documentation source checks
+        run: |
+          node --check site/algorithms.js
+          node --check site/experiments.js
+          node --check site/console.js
+          node --test site/test/*.test.cjs
+          python3 site/test/rust-parity.py
+          python3 site/test/check-site.py
       - name: Install mdBook
         uses: taiki-e/install-action@v2
         with:
-          tool: mdbook
+          tool: mdbook@0.5.4
       - name: Build docs book
         run: |
           mkdir -p "$PWD/dist"
@@ -47,8 +60,16 @@ jobs:
       - name: Assemble site (landing + book)
         run: |
           mkdir -p dist
-          cp -r site/* dist/
-          echo "== dist:"; ls -la dist; echo "== dist/docs:"; ls dist/docs | head
+          cp site/*.html site/*.css site/*.js site/*.svg dist/
+          python3 site/test/check-site.py --dist dist
+      - name: Install isolated browser test tools (not shipped)
+        run: |
+          npm install --prefix "$RUNNER_TEMP/blackbox-webcheck" --no-save --no-package-lock --no-audit --no-fund playwright@1.56.1 axe-core@4.11.0
+          node "$RUNNER_TEMP/blackbox-webcheck/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Browser interactions, mobile, keyboard, and accessibility
+        env:
+          NODE_PATH: ${{ runner.temp }}/blackbox-webcheck/node_modules
+        run: node site/test/browser-check.cjs dist
       - name: Upload pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

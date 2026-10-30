@@ -21,13 +21,20 @@
     d.className = 'ln' + (cls ? ' ' + cls : '');
     d.innerHTML = html === '' ? '&nbsp;' : html;
     screen.appendChild(d);
+    if (screen.childElementCount > 350) screen.firstElementChild.remove();
     scrollBottom();
     return d;
   }
   const note = (cls, msg) => line(`<b>${esc(cls)}</b> ${esc(msg)}`, 'ev');
 
   /* Skip flag: 's' fast-forwards the active tape. */
-  let skip = false;
+  let skip = false, busy = true;
+  const state = $('terminal-state'), skipButton = $('skip-tape');
+  function ready() {
+    busy = false; skip = false;
+    state.textContent = 'ready · help lists commands';
+    skipButton.disabled = true;
+  }
 
   async function wait(ms) {
     if (skip || REDUCED) return;
@@ -84,7 +91,7 @@
 
   async function runDemo() {
     line('replay — captured verbatim from a real run of <b>blackbox demo --once</b> (v1.1.3, linux x86_64). ports &amp; data dir vary per run; the values below are that run.', 'ev');
-    note("skippable", "press 's' to fast-forward the tape");
+    note('skippable', 'use the skip tape button to fast-forward; keyboard commands render instantly');
     for (const entry of DEMO) {
       const [cls, html] = entry.p;
       if (html === undefined) { if (cls !== '') line('', cls); else line('&nbsp;'); continue; }
@@ -123,13 +130,19 @@
     '  demo           replay the measured 4-engine boot (v1.1.3 · 3.1 s · exit 0)\n' +
     '  open [1-4]     peel a layer off the box (1 telemetry · 2 queue · 3 edge · 4 egress)\n' +
     '  trace [32hex]  inspect a recorded trace — the measured crash trace is preloaded\n' +
+    '  kill -9        open the upstream-crash guided simulation\n' +
+    '  corrupt        open the sealed-segment self-heal explanation\n' +
+    '  flood          simulate 5,000 local event-ID dedup checks\n' +
+    '  shed85         set the memory-policy model to 85%\n' +
+    '  simhash        edit prompts in the real text-fingerprint playground\n' +
+    '  scanners       evaluate local scanner rules (no HTTP requests)\n' +
     '  clear          wipe the tape\n' +
     '  <span class="diml">a few commands are hidden. the box rewards curiosity.</span>';
 
   function flashLayer(n) {
     const li = $('l' + n);
     if (!li) return;
-    li.scrollIntoView({ behavior: REDUCED ? 'auto' : 'smooth', block: 'center' });
+    li.scrollIntoView({ behavior: REDUCED || skip ? 'auto' : 'smooth', block: 'center' });
     const face = li.querySelector('.l-face');
     if (face) {
       face.style.outline = '2px solid var(--accent)';
@@ -139,18 +152,18 @@
 
   const CMD = {};
   CMD.help = () => line(HELP, 'diml');
-  CMD.clear = () => { screen.innerHTML = ''; skip = false; };
+  CMD.clear = () => { screen.replaceChildren(); };
 
   CMD.open = async (arg) => {
     if (/^[1-4]$/.test(arg || '')) {
       line(`peeling straight to layer ${arg} — the card carries its gate provenance.`, 'accl');
-      document.getElementById('open').scrollIntoView({ behavior: REDUCED ? 'auto' : 'smooth', block: 'start' });
+      document.getElementById('open').scrollIntoView({ behavior: REDUCED || skip ? 'auto' : 'smooth', block: 'start' });
       flashLayer(arg);
       await type("numbers on the chips are from gates re-runnable in-repo: cargo test --workspace --release.", 'diml', 110);
       return;
     }
     line('peeling the box layer by layer — telemetry → queue → edge → egress …', 'accl');
-    document.getElementById('open').scrollIntoView({ behavior: REDUCED ? 'auto' : 'smooth', block: 'start' });
+    document.getElementById('open').scrollIntoView({ behavior: REDUCED || skip ? 'auto' : 'smooth', block: 'start' });
     await type("each layer lands stamped with the gate that proves it. 'open 4' jumps straight to the money.", 'diml', 110);
   };
 
@@ -164,7 +177,7 @@
       note('trace', 'the mint: every ingest gets a 32-hex id, returned in the x-blackbox-trace-id response header');
       note('records', 'this trace carries the POST /api/checkout → 500, plus the captured Sentry envelope it triggered (SentryCrash)');
       note('replay', `blackbox replay ${DEMO_TRACE} --target http://127.0.0.1:34029 --data ${DEMO_PARENT_FULL} — deterministic: same requests, same bytes`);
-      await type("on a live node, paste your own x-blackbox-trace-id after `trace` — and its admin api answers GET /api/trace/&lt;id&gt; with the same layout.", 'diml', 95);
+      await type('On your own live node, GET /api/trace/<id> inspects recorded traces. This website only carries the one demo trace.', 'diml', 95);
       return;
     }
     if (!/^[0-9a-f]{32}$/.test(id)) {
@@ -184,25 +197,22 @@
     await type('deterministic replay: refire, then diff. that is what "recorded flight tape" means here.', 'diml', 95);
   };
 
-  /* hidden: the Torture Room, honestly */
-  CMD['kill'] = async (arg) => {
+  /* Local experiments: never claim a process was killed or a request sent. */
+  CMD.kill = (arg) => {
     if (arg === '-9') {
-      await type('SIGKILL delivered mid-append …', 'warnl', 120);
-      note('note', 'RAW segment semantics: a torn tail on a still-open segment is legitimate — not corruption');
-      note('down', 'process down. supervisor watching …');
-      await wait(700);
-      line('<span class="okl">resurrected in 0.203 s</span> — audit chain intact, zero orphaned frames', 'okl');
-      note('evidence', 'gates P5 resurrection · soak recovery 0.203/0.257 s measured across runs v1.1.2c');
-      await type("'kill -9' broke the process — not the box. probes become interactive in pass 2; the gates hold the proof meanwhile.", 'diml', 90);
+      note('simulation', 'opened the upstream-crash explanation; no process was killed. 0.203 / 0.257 s are historical soak measurements.');
+      window.BlackboxExperiments.runProbe('kill');
       return;
     }
     line('(SIGKILL mid-append does not ask politely — try `kill -9`.)', 'diml');
   };
 
-  CMD['corrupt'] = CMD['flood'] = CMD['shed85'] = CMD['scanners'] = () => {
-    line('the interactive Torture Room unlocks in the next pass of this site.', 'warnl');
-    note('locked', 'each probe\'s measured verdict is already stamped on its #torture card: kill -9 → 0.203 s · corrupt → self-heal · flood → 5000/5000 · Shed85 → errors 100%');
+  for (const name of ['corrupt', 'flood', 'shed85']) CMD[name] = () => {
+    note('local model', `opened ${name}; no disk, network or live-node operations.`);
+    window.BlackboxExperiments.runProbe(name);
   };
+  CMD.simhash = () => { note('local computation', '64-bit SimHash text fingerprints; cache control isolation is not modeled.'); window.BlackboxExperiments.openSimhash(); };
+  CMD.scanners = () => { note('local computation', 'scanner rule range; no requests are sent.'); window.BlackboxExperiments.openScanners(); };
 
   CMD['sudo'] = () => line('nice try — the box opens for everyone. it all runs unprivileged; no root required.', 'fgl');
   CMD.why = () => line('because a "recorder" nobody can inspect is just another black box. gates &gt; claims — everything re-runs from the repo.', 'fgl');
@@ -214,30 +224,36 @@
   const history = [];
   let hIdx = -1;
 
-  function runRaw(raw) {
+  async function runRaw(raw, instant = false) {
     const v = raw.trim();
     if (!v) return;
+    if (busy) { state.textContent = 'tape running · skip it before the next command'; return; }
+    busy = true; skip = instant || REDUCED;
+    state.textContent = 'running ' + v.split(/\s+/)[0];
+    skipButton.disabled = false;
     line('<span class="okl">$</span> ' + esc(v));
     history.push(v);
+    if (history.length > 100) history.shift();
     hIdx = -1;
 
     const parts = v.split(/\s+/);
     const head = parts[0].toLowerCase();
     const rest = parts.slice(1).join(' ');
 
-    const fn = CMD[head] || null;
-    if (fn) { fn(rest); return; }
-    if (head.startsWith('sudo')) { CMD.sudo(); return; }
-    line(`unknown: '${esc(head)}' — try <span class="accl">help</span>`, 'warnl');
-    if (/^(flood|corrupt|shed85|scanners)($|\s)/.test(v)) {
-      note('hint', 'those probes unlock in pass 2 — meanwhile, see #torture for each one\'s measured verdict');
-    }
+    try {
+      const fn = Object.hasOwn(CMD, head) ? CMD[head] : null;
+      if (fn) await fn(rest);
+      else if (head.startsWith('sudo')) CMD.sudo();
+      else line(`unknown: '${esc(head)}' — try <span class="accl">help</span>`, 'warnl');
+    } catch {
+      note('error', 'the browser command could not finish; reload or try again. No live-node operation was performed.');
+    } finally { ready(); }
   }
 
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       const v = input.value; input.value = '';
-      runRaw(v);
+      runRaw(v, true);
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       if (!history.length) return;
@@ -252,12 +268,14 @@
     }
   });
   screen.addEventListener('click', () => input.focus());
+  skipButton.addEventListener('click', () => { skip = true; });
+  $('demo-play').addEventListener('click', event => runRaw('demo', event.detail === 0));
 
   /* 's' skips the active tape (only when the input is not focused) */
   document.addEventListener('keydown', (e) => {
     if (e.key !== 's' || e.metaKey || e.ctrlKey || e.altKey) return;
     if (/INPUT|TEXTAREA/.test(document.activeElement.tagName) && document.activeElement !== input) return;
-    if (document.activeElement !== input) { skip = true; setTimeout(() => { skip = false; }, 300); }
+    if (busy && document.activeElement !== input) skip = true;
   });
 
   /* The peel: dim covered layers; light the reveal panel. Sticky CSS does the
@@ -292,8 +310,8 @@
   if (REDUCED) {
     for (const [cls, txt] of BOOT) line(esc(txt), cls);
     line('reduced motion honored: typing disabled, everything the same.', 'ev');
-    input.focus();
+    ready();
   } else {
-    boot();
+    boot().catch(() => note('error', 'console boot interrupted; the docs remain available.')).finally(ready);
   }
 })();

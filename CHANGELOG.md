@@ -8,6 +8,13 @@ Project Blackbox is authored by **Dr.wolfic** for **fowzanasoftsolution**.
 
 ## [Unreleased]
 
+### Added
+- OPEN THE BOX pass 2: guided crash/self-heal explanations, local webhook
+  dedup and memory-policy models, a source-ported 64-bit SimHash playground,
+  and scanner rule range. All simulations are labeled; no tests send traffic.
+- Browser algorithm tests and Rust/JavaScript parity checks gate Pages
+  publication. Documentation chapter paths now resolve to the actual source.
+
 ### Changed
 - The soak-memory gate (`soak_memory_bound`) now hard-fails at **43 MiB
   VmRSS**: the monitored steady state stays **42.0 MiB**, with +1 MiB of

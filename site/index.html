@@ -20,8 +20,9 @@
     <nav>
       <a href="#open">the box</a>
       <a href="#torture">torture room</a>
+      <a href="#simhash">near-cache</a>
+      <a href="#scanners">shield</a>
       <a href="docs/">docs</a>
-      <a href="docs/releases.html">releases</a>
       <a href="https://github.com/fowzanasoftsolution/blackbox" rel="noopener">repo</a>
     </nav>
   </div>
@@ -34,12 +35,13 @@
       <h1>Open <span class="thin">the</span> box<span class="caret" aria-hidden="true">_</span></h1>
       <p class="lede">A flight recorder for your stack, packed into <b>one static Rust binary</b>.
         It quietly replaces four layers of infrastructure. This page is an inspection console —
-        boot it, peel it, punish it. Every number is a <em>measured</em> one.</p>
+        boot it, peel it, explore its limits. Benchmarks are <em>measured</em>;
+        browser experiments are labeled simulations.</p>
 
       <div class="badges" role="list">
         <span class="badge" role="listitem">v1.1.3</span>
         <span class="badge" role="listitem">17.18&nbsp;MB binary</span>
-        <span class="badge" role="listitem">217 gates green</span>
+        <span class="badge" role="listitem">217 workspace tests</span>
         <span class="badge" role="listitem">Apache-2.0</span>
         <span class="badge" role="listitem">zero deps</span>
       </div>
@@ -57,10 +59,15 @@
         </div>
       </div>
       <p class="hintc">commands to try: <code>help</code> · <code>demo</code> · <code>open 2</code> ·
-        <code>trace 2b00f9a28cd80998fb91d8ab906df1f8</code> — a few are hidden. press <code>s</code> to skip the tape.</p>
+        <code>kill -9</code> · <code>simhash</code> · <code>scanners</code></p>
+      <div class="tape-controls">
+        <button type="button" class="btn small" id="demo-play">replay measured demo</button>
+        <button type="button" class="btn ghost small" id="skip-tape">skip tape</button>
+        <span id="terminal-state" role="status">booting the console…</span>
+      </div>
 
-      <noscript><div class="noscript">The terminal needs JavaScript (it is a ~10 KB vanilla script that lints itself, no
-        network calls, no third-party code). The <a href="docs/">docs</a> work fine without it.</div></noscript>
+      <noscript><div class="noscript">The terminal and experiments need JavaScript: vanilla scripts, no
+        network calls, no third-party code. The <a href="docs/">docs</a> work fine without it.</div></noscript>
     </div>
   </section>
 
@@ -90,7 +97,8 @@
           <div class="l-face">
             <div class="l-no">layer 2 <span>/ durable jobs</span></div>
             <h3>Temporal + Redis</h3>
-            <p>Webhooks durably enqueued in 202&nbsp;ms, delivered with leases, retries, a reaper,
+            <p>Webhooks receive HTTP <code>202 Accepted</code> after a durable group-commit,
+              then are delivered with leases, retries, a reaper,
               an idempotency sweep and honest DLQ accounting — one fsync'd segment file owning the state.</p>
             <ul class="chips">
               <li>zero-lost gate: 5,000 / 5,000 delivered · DLQ 0</li>
@@ -109,7 +117,7 @@
               the limiter or the writer ever see them.</p>
             <ul class="chips">
               <li>≥ 8,000 req/s throughput gate</li>
-              <li>429s authored by the limiter, logged per rule</li>
+              <li>429s authored by the limiter · scanner noise dropped before capture</li>
               <li>provenance: gates P7 shield · P2 throughput</li>
             </ul>
           </div>
@@ -135,9 +143,10 @@
         <div class="r-face">
           <div class="l-no">what's left inside the box</div>
           <h3>One binary. <span class="ok">Nothing else.</span></h3>
-          <p><b>17.18 MB</b> static · <b>217</b> tests green · <b>3</b>× 30-minute soaks at
-            31.82 / 28.29 MiB RSS · <b>0</b> transport errors across 267,440 soak requests ·
-            <b>0.203 s</b> crash recovery · bit-rot self-heals verified in three runs.</p>
+          <p>v1.1.3 evidence: <b>17.18 MB</b> static · <b>217</b> workspace tests · latest documented 30-minute soak:
+            <b>31.82 / 28.29 MiB</b> peak RSS · <b>0</b> transport errors across 267,440 requests ·
+            <b>0.203 / 0.257 s</b> crash recoveries. Three soak runs are documented,
+            including the first run's failure and its fix.</p>
           <div class="cta-row">
             <a class="btn" href="docs/getting-started.html">unbox it in 60 seconds</a>
             <a class="btn ghost" href="docs/verification.html">read the gate matrix</a>
@@ -147,60 +156,169 @@
     </div>
   </section>
 
-  <!-- ================= TORTURE ROOM (TEASER) ================= -->
+  <!-- ================= TORTURE ROOM ================= -->
   <section id="torture" class="torture">
     <div class="wrap">
       <h2><span class="kicker">step 02</span>The Torture Room</h2>
-      <p class="sub">"Break the box. No one has succeeded." Four documented ways people attempt it —
-        each already answered by a gate. The interactive room opens in the next pass; the evidence is already here.</p>
+      <p class="sub">Break the process. Inspect what survives. These are <b>guided browser simulations</b>
+        of documented behavior, not a live node. No process is killed, no file is corrupted,
+        and no webhook leaves your browser. Historical evidence is linked separately.</p>
 
       <div class="grid2">
         <article class="tcard">
-          <h3><code>kill -9</code> mid-append</h3>
-          <p>A real SIGKILL during frame writes. RAW segments tolerate the torn tail; the node
-            resurrects itself with its audit chain intact.</p>
-          <div class="verdict"><b>0.203 s</b> recovery · <b>0</b> records lost <span class="src">gate P5 resurrection · v1.1.2c soak</span></div>
-          <button class="punish" disabled>attempt on your own node — soon</button>
+          <h3><code>kill -9</code> the upstream app</h3>
+          <p>Step through a request interrupted by an upstream crash: the supervisor holds the
+            connection, restarts the app, and resumes traffic. This models an <b>upstream app</b>
+            kill, not a claim that every uncommitted write survives a node crash.</p>
+          <div class="verdict"><b>0.203 / 0.257 s</b> historical recoveries
+            <a class="src" href="docs/verification.html#three-30-minute-soaks">v1.1.2c soak · measured, not timed here</a></div>
+          <ol class="probe-tape" id="kill-tape" aria-label="Upstream crash simulation steps"></ol>
+          <p class="probe-state" id="kill-state" role="status">guided simulation · ready</p>
+          <div class="probe-controls">
+            <button type="button" class="punish" data-probe="kill">simulate crash</button>
+            <button type="button" class="reset" data-reset="kill" aria-label="Reset crash simulation">reset</button>
+          </div>
         </article>
 
         <article class="tcard">
           <h3>flip bytes in a sealed segment</h3>
           <p>Corrupt a cold <code>.zst</code>. The read path fails verification, surfaces
             <code>Err(Corrupt)</code>, and restores the digest-verified replica from the cold tier.</p>
-          <div class="verdict"><b>self-healed</b> — visible in the demo replay, phase E <span class="src">gate P6 bit-rot heal</span></div>
-          <button class="punish" disabled>interactive corruptor — soon</button>
+          <div class="verdict"><b>1 heal · 1 record intact</b> in the measured demo
+            <a class="src" href="docs/experiments.html#sealed-segment-self-heal">demo phase E · gate P6 bit-rot heal</a></div>
+          <ol class="probe-tape" id="corrupt-tape" aria-label="Self-heal simulation steps"></ol>
+          <p class="probe-state" id="corrupt-state" role="status">guided simulation · ready</p>
+          <div class="probe-controls">
+            <button type="button" class="punish" data-probe="corrupt">simulate bit-rot</button>
+            <button type="button" class="reset" data-reset="corrupt" aria-label="Reset self-heal simulation">reset</button>
+          </div>
         </article>
 
         <article class="tcard">
           <h3>flood 5,000 duplicate webhooks</h3>
-          <p>Real Stripe retries share event IDs. The dedup lane swallows the repeats while
-            every distinct event still delivers.</p>
-          <div class="verdict"><b>5,000 / 5,000</b> delivered · DLQ 0 <span class="src">gate P3 zero-lost</span></div>
-          <button class="punish" disabled>dedup flood — soon</button>
+          <p>Retries share event IDs. Choose how many unique IDs appear in 5,000 requests;
+            a local <code>Set</code> models the dedup window. It is not the durable queue or a delivery test.</p>
+          <label class="field-label" for="flood-distinct">Distinct event IDs</label>
+          <select id="flood-distinct"><option value="1">1 event, 5,000 retries</option>
+            <option value="100">100 events, 50 attempts each</option>
+            <option value="5000">5,000 distinct events</option></select>
+          <div class="verdict"><b>5,000 / 5,000 distinct webhooks</b> delivered by the real gate
+            <a class="src" href="docs/experiments.html#duplicate-flood">gate P3 zero-lost · separate from this model</a></div>
+          <pre class="lab-output" id="flood-output" aria-label="Dedup simulation result">Choose a workload, then send the local flood.</pre>
+          <p class="probe-state" id="flood-state" role="status">local simulation · ready</p>
+          <div class="probe-controls">
+            <button type="button" class="punish" data-probe="flood">simulate 5,000 requests</button>
+            <button type="button" class="reset" data-reset="flood" aria-label="Reset dedup simulation">reset</button>
+          </div>
         </article>
 
         <article class="tcard">
           <h3>squeeze the RSS watermark</h3>
-          <p>Push the node past <code>Shed85</code>. Head-sampling drops *healthy* records first;
-            errors, crashes and queue jobs keep flowing at 100%.</p>
-          <div class="verdict"><b>errors stay 100%</b> even at Backpressure95 <span class="src">gate P4 RAM shed</span></div>
-          <button class="punish" disabled>watermark squeeze — soon</button>
+          <p>Move the modeled RSS above <code>Shed85</code>. Healthy, fast 2xx telemetry has
+            a 1% keep probability; errors and slow traces are exempt from this sampling rule.</p>
+          <label class="field-label" for="rss-level">RSS / memory budget: <output id="rss-value" for="rss-level">60%</output></label>
+          <input type="range" id="rss-level" min="40" max="100" value="60">
+          <pre class="lab-output" id="shed-output" aria-label="Memory policy simulation result"></pre>
+          <p class="probe-state" id="shed-state" role="status"></p>
+          <div class="verdict"><b>Policy model, not allocated RAM</b>
+            <a class="src" href="docs/experiments.html#memory-watermarks">gate P4 · Backpressure95 is published, not an HTTP traffic gate</a></div>
         </article>
       </div>
-      <p class="unlock">🔒 <b>pass 2</b> will wire these four as interactive consoles fed by recorded gate
-        captures — same honesty labels, real transcripts.</p>
+      <p class="unlock">Want the real thing? Run <code>blackbox demo --once</code> or the
+        <a href="docs/verification.html">release-mode gates</a> on your own node.
+        Browser playback speed is not a performance measurement.</p>
+    </div>
+  </section>
+
+  <!-- ================= SIMHASH ================= -->
+  <section id="simhash" class="lab-section">
+    <div class="wrap">
+      <h2><span class="kicker">step 03</span>Same idea. Different bytes.</h2>
+      <p class="sub">A real JavaScript port of the Rust text fingerprint: normalize → word 3-shingles →
+        FNV-1a → 64-bit SimHash. Edit either prompt and watch the bits disagree.
+        This computes locally; it does not call an LLM or return a cached response.</p>
+      <div class="lab-panel">
+        <div class="prompt-grid">
+          <div><label class="field-label" for="prompt-a">Cached prompt</label>
+            <textarea id="prompt-a" rows="4" maxlength="2000" spellcheck="false">Summarize the invoice for order 1042, then list the next steps.</textarea></div>
+          <div><label class="field-label" for="prompt-b">Incoming prompt</label>
+            <textarea id="prompt-b" rows="4" maxlength="2000" spellcheck="false">SUMMARIZE the invoice for order 8080! Then list the next steps.</textarea></div>
+        </div>
+        <div class="presets" aria-label="Prompt examples">
+          <button type="button" class="reset" data-preset="format">format + ID drift</button>
+          <button type="button" class="reset" data-preset="near">one word changed</button>
+          <button type="button" class="reset" data-preset="different">different task</button>
+          <button type="button" class="reset" data-preset="numbers">numeric collision</button>
+        </div>
+        <div class="distance-row"><div><span class="field-label">Hamming distance</span>
+          <strong id="sim-distance">0 / 64 bits</strong></div>
+          <p id="sim-result" role="status" aria-live="polite"></p></div>
+        <div class="bit-label">cached fingerprint <code id="hash-a"></code></div>
+        <div class="bits" id="bits-a" aria-hidden="true"></div>
+        <div class="bit-label">incoming fingerprint <code id="hash-b"></code></div>
+        <div class="bits" id="bits-b" aria-hidden="true"></div>
+        <p class="legend"><span class="bit-key"></span> equal bits <span class="bit-key changed"></span> different bits · bit 63 → bit 0</p>
+        <details><summary>Inspect normalized text &amp; cache safety</summary>
+          <dl class="normal-text"><dt>cached</dt><dd id="normalized-a"></dd><dt>incoming</dt><dd id="normalized-b"></dd></dl>
+          <p>The default distance budget is ≤ 3. The real gateway also isolates tenant, authorization,
+            method, URL and request controls; those checks are not implemented here.
+            Empty prompts are not near-cache candidates. <b>Numeric runs collapse to #:</b>
+            differing amounts or IDs can collide. This is a similarity heuristic, not proof of semantic equivalence.</p>
+          <a href="docs/experiments.html#simhash-playground">algorithm, limits &amp; Rust source</a>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= SCANNER RANGE ================= -->
+  <section id="scanners" class="lab-section">
+    <div class="wrap">
+      <h2><span class="kicker">step 04</span>The scanner range</h2>
+      <p class="sub">Try a raw path against a JavaScript port of the scanner shield.
+        Matching happens on the raw path, then one percent-decoded pass. Nothing is sent to a server:
+        this is a rule evaluator, not a security scan or a complete WAF.</p>
+      <div class="lab-panel">
+        <form id="scanner-form">
+          <label class="field-label" for="scanner-path">Raw request path (not a URL)</label>
+          <div class="scanner-input"><input id="scanner-path" value="/.env" maxlength="2048" autocomplete="off"
+            autocapitalize="off" spellcheck="false" required pattern="/.*" aria-describedby="scanner-hint">
+            <button type="submit" class="btn small">test path</button></div>
+          <p class="legend" id="scanner-hint">Start with /. Query strings are ignored; dot segments are not normalized by a URL parser.</p>
+        </form>
+        <div class="presets" aria-label="Scanner path examples">
+          <button type="button" class="reset" data-path="/.env">.env</button>
+          <button type="button" class="reset" data-path="/%2Egit/config">encoded .git</button>
+          <button type="button" class="reset" data-path="/%2e%2e/etc/passwd">traversal</button>
+          <button type="button" class="reset" data-path="/backup.sql">backup</button>
+          <button type="button" class="reset" data-path="/settings.env">legitimate .env suffix</button>
+          <button type="button" class="reset" data-path="/%252Egit/config">double encoding</button>
+        </div>
+        <p class="scanner-verdict" id="scanner-verdict" role="status"></p>
+        <pre class="lab-output" id="scanner-output" aria-label="Scanner rule result"></pre>
+        <div class="scanner-counts"><span>local checks <b id="scanner-total">0</b></span>
+          <span>blocked <b id="scanner-blocked">0</b></span><span>passed <b id="scanner-passed">0</b></span>
+          <button type="button" class="reset" id="scanner-reset">reset range</button></div>
+        <details><summary>What a pass does—and does not—mean</summary>
+          <p>A blocked path would get the shield's bare HTTP 404 before the limiter, recorder or upstream.
+            A pass only means <em>this matcher</em> did not block it; it says nothing about authorization,
+            application status, safety, or other defenses. Malformed encoding fails open after the raw check;
+            double encoding is not recursively decoded.</p>
+          <a href="docs/experiments.html#scanner-range">limitations, matcher behavior &amp; Rust source</a>
+        </details>
+      </div>
     </div>
   </section>
 
   <!-- ================= DOCS ================= -->
   <section id="docs" class="docsrow">
     <div class="wrap">
-      <h2><span class="kicker">step 03</span>Read the schematics</h2>
+      <h2><span class="kicker">step 05</span>Read the schematics</h2>
       <p class="sub">Full documentation ships as an mdBook built from the same repo as the code it documents.</p>
       <div class="dgrid">
         <a class="dcard" href="docs/getting-started.html"><b>Getting started</b><span>install &rarr; <code>demo --once</code> &rarr; wrap your app</span></a>
         <a class="dcard" href="docs/architecture.html"><b>Architecture</b><span>8 crates · 4 engines · watermark OS</span></a>
         <a class="dcard" href="docs/verification.html"><b>Verification</b><span>gate matrix · 3-run soak table · THP caveat</span></a>
+        <a class="dcard" href="docs/experiments.html"><b>Browser experiments</b><span>what is simulated · what is computed · source &amp; limits</span></a>
         <a class="dcard" href="docs/releases.html"><b>Releases</b><span>SHA256SUMS · Ed25519 · <code>self-update</code> canary</span></a>
         <a class="dcard" href="docs/security.html"><b>Security</b><span>reporting · exposure model · hardening</span></a>
         <a class="dcard" href="docs/changelog.html"><b>Changelog</b><span>what each release ships and fixes</span></a>
@@ -215,21 +333,26 @@
     <div>
       <div class="fbrand">▣ BLACKBOX</div>
       <p class="fattrib">by <b>Dr.wolfic</b> · shipped by <b>fowzanasoftsolution</b> · Apache-2.0</p>
+      <p class="india-love"><img src="made-in-india.svg" alt="Made in India with love" width="178" height="20"></p>
     </div>
     <nav class="fnlinks">
       <a href="https://github.com/fowzanasoftsolution/blackbox">repo</a>
       <a href="docs/">docs</a>
       <a href="https://github.com/fowzanasoftsolution/blackbox/releases">releases</a>
       <a href="https://github.com/fowzanasoftsolution/blackbox/blob/main/SECURITY.md">security policy</a>
+      <a class="coffee" href="https://buymeacoffee.com/zuhayfaja">☕ a little coffee, a lot of love 💛</a>
     </nav>
   </div>
   <div class="wrap fhonest">
-    Every number on this page mirrors a measured run; gates re-run from the repo (<code>cargo test --workspace --release</code>).
-    Tapes are replays, labeled as such — nothing here is live. No third-party scripts, no cookies, no analytics.
+    Benchmarks mirror measured runs; gates re-run from the repo (<code>cargo test --workspace --release</code>).
+    The demo is a recorded replay; the Torture Room is a guided model. SimHash and scanner rules compute in your browser.
+    Nothing here connects to a live node. No third-party scripts, no cookies, no analytics.
     · <span id="year">2026</span>
   </div>
 </footer>
 
+<script src="algorithms.js" defer></script>
+<script src="experiments.js" defer></script>
 <script src="console.js" defer></script>
 </body>
 </html>

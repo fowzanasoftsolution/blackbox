@@ -1,8 +1,9 @@
 # Summary
 
-- [Getting started](src/getting-started.md)
-- [Architecture](src/architecture.md)
-- [Verification](src/verification.md)
-- [Releases & update verification](src/releases.md)
-- [Security](src/security.md)
-- [Changelog](src/changelog.md)
+- [Getting started](getting-started.md)
+- [Architecture](architecture.md)
+- [Verification](verification.md)
+- [Browser experiments](experiments.md)
+- [Releases & update verification](releases.md)
+- [Security](security.md)
+- [Changelog](changelog.md)

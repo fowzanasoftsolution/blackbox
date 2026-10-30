@@ -6,4 +6,4 @@ description = "One ~17 MB static binary that replaces four layers of infrastruct
 
 [output.html]
 git-repository-url = "https://github.com/fowzanasoftsolution/blackbox"
-edit-url-template = "https://github.com/fowzanasoftsolution/blackbox/edit/main/docs-src/{path}"
+edit-url-template = "https://github.com/fowzanasoftsolution/blackbox/edit/main/docs-src/src/{path}"
